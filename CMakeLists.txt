@@ -5,6 +5,7 @@ add_compile_options(-std=c++14 -ggdb)
 
 find_package(catkin REQUIRED COMPONENTS
   pcl_ros
+  tf_conversions
 )
 
 
@@ -13,6 +14,7 @@ catkin_package(
   #  include
   CATKIN_DEPENDS 
   pcl_ros
+  tf_conversions
 )
 
 ###########
@@ -32,6 +34,10 @@ include_directories(
 
 add_executable(generate_mesh src/tools/generate_mesh.cpp)
 target_link_libraries(generate_mesh ${catkin_LIBRARIES})
+
+add_executable(slam_logger_node src/slam_logger/slam_logger_node.cpp)
+target_link_libraries(slam_logger_node ${catkin_LIBRARIES})
+
 
 #############
 ## Install ##
