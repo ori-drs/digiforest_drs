@@ -53,6 +53,40 @@ struct Time
    }
 };
 
+
+class IsometryWithTime
+{
+public:
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+public:
+
+  IsometryWithTime(){
+    pose = Eigen::Isometry3d::Identity();
+    sec = 0;
+    nsec = 0;
+    key = 0;
+  }
+
+  IsometryWithTime(Eigen::Isometry3d pose_in,
+         int sec_in,
+         int nsec_in,
+         uint64_t key_in){
+    pose = pose_in;
+    sec = sec_in;
+    nsec = nsec_in;
+    key = key_in;
+  }
+
+  ~IsometryWithTime(){
+  }
+
+  Eigen::Isometry3d pose;
+  uint32_t sec;
+  uint32_t nsec;
+  uint64_t key;
+};
+
+
 struct CommandLineConfig
 {
     string path_topic;
@@ -95,6 +129,7 @@ class App{
                            IcpCloudType::Ptr& point_cloud_in_odometry,
                            Time& time, Eigen::Isometry3d &base_to_odom);
 
+    void writeResult();
 
   private:
     ros::NodeHandle& node_;
@@ -102,8 +137,13 @@ class App{
     CommandLineConfig cl_config_;
     std::string cloud_frame_id_;
 
-    //tf2_ros::Buffer buffer_;
-    //tf2_ros::TransformListener listener_;
+
+    std::stringstream data_directory_path_; // Create data folder for output
+    Eigen::Isometry3d last_base_to_odom_;
+
+    std::vector<IsometryWithTime, Eigen::aligned_allocator<IsometryWithTime> > all_base_to_odom_;
+
+
     tf::TransformListener listener_;
     //std::unique_ptr<SimpleViz> viz_;
 
@@ -166,24 +206,118 @@ class App{
 };
 
 
+std::string getTimeAsString(){
+    time_t rawtime;
+    struct tm * timeinfo;
+    char buffer[80];
+    time (&rawtime);
+    timeinfo = localtime(&rawtime);
+    strftime(buffer,sizeof(buffer),"%Y-%m-%d-%H-%M-%S",timeinfo);
+    std::string str(buffer);
+    return str;
+}
+
+
+
 // Initialise the TF buffer with 60 seconds history to account for delayed local
 // map clouds
 App::App(ros::NodeHandle& node, const CommandLineConfig &cl_config):
     node_(node), cl_config_(cl_config){
 
-    //viz_ = std::make_unique<SimpleViz>();
+  //viz_ = std::make_unique<SimpleViz>();
 
-    last_cloud_pub_ = node_.advertise<sensor_msgs::PointCloud2>("/vilens_map/last_cloud", 10, true);
-    combined_cloud_pub_ = node_.advertise<sensor_msgs::PointCloud2>("/vilens_map/combined_cloud", 10, true);
-    combined_cloud_rgb_pub_ = node_.advertise<sensor_msgs::PointCloud2>("/vilens_map/combined_cloud_rgb", 10, true);
-    //registered_cloud_list_ = std::make_shared<RegisteredCloudList>();
+  last_cloud_pub_ = node_.advertise<sensor_msgs::PointCloud2>("/vilens_map/last_cloud", 10, true);
+  combined_cloud_pub_ = node_.advertise<sensor_msgs::PointCloud2>("/vilens_map/combined_cloud", 10, true);
+  combined_cloud_rgb_pub_ = node_.advertise<sensor_msgs::PointCloud2>("/vilens_map/combined_cloud_rgb", 10, true);
+  //registered_cloud_list_ = std::make_shared<RegisteredCloudList>();
 
-    write_map_srv_ = node_.advertiseService("/vilens_map/write_map", &App::writeMapRequest, this);
-    update_map_srv_ = node_.advertiseService("/vilens_map/update_map", &App::updateMapRequest, this);
+  write_map_srv_ = node_.advertiseService("/vilens_map/write_map", &App::writeMapRequest, this);
+  update_map_srv_ = node_.advertiseService("/vilens_map/update_map", &App::updateMapRequest, this);
 
-    slam_map_ = boost::make_shared<IcpCloudType>();
-    slam_map_rgb_ = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
+  slam_map_ = boost::make_shared<IcpCloudType>();
+  slam_map_rgb_ = boost::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
+
+  last_base_to_odom_ = Eigen::Isometry3d::Identity();
+
+
+
+  data_directory_path_ << getEnvVar("HOME") << "/slam_logger/" << getTimeAsString();
+  std::string path = data_directory_path_.str().c_str();
+  boost::filesystem::path dir(path);
+  if(boost::filesystem::exists(path))
+    boost::filesystem::remove_all(path);
+
+  if(boost::filesystem::create_directories(dir))
+  {
+    cout << "Created Vilens SLAM debug data directory: " << string(path) << endl
+         << "============================" << endl;
+  }
+
+  // Create additional directory for odometry output
+  std::string data_directory_path_individual = data_directory_path_.str() + "/individual_clouds";
+  boost::filesystem::path dir3(data_directory_path_individual);
+  boost::filesystem::create_directories(data_directory_path_individual);
+
+
 }
+
+
+
+void App::writeResult() {
+  int param_platform_id = 1;
+
+  // Print the final result of optimization
+  //Values::ConstFiltered<Pose3> solution_poses = solution_.filter<Pose3>();
+
+  std::ofstream slam_problem_filestream;
+  slam_problem_filestream.open( std::string ( data_directory_path_.str() + "/slam_pose_graph.g2o" ) );
+  slam_problem_filestream << "# VERTEX_SE3:QUAT_TIME id x y z qx qy qz qw sec nsec\n";
+  slam_problem_filestream << "# EDGE_SE3:QUAT tail_id head_id factor_x factor_y factor_z factor_qx factor_qy factor_qz factor_qw info_matrix\n";
+  slam_problem_filestream << "# Information matrix is a 21 element upper triangular matrix ordered (r, R) which is not the GTSAM ordering\n";
+  //slam_problem_filestream << "# GNSS_LLA_REF latitude longitude altitude\n";
+  //slam_problem_filestream << "# These are the LLA coordinates of the initial pose\n";
+  //slam_problem_filestream << "# GNSS_LLA_TO_MAP x y z qx qy qz qw \n";
+  //slam_problem_filestream << "# This is the transform between the LLA coordinates (ENU frame) and map frame.\n";
+  //slam_problem_filestream << "# TAG_DETECTION slam_id tag_id x y z qx qy qz qw sec nsec\n";
+  //slam_problem_filestream << "# This is the raw slam-pose-to-tag measurement\n";
+  //slam_problem_filestream << "# TAG_POSE slam_id tag_id x y z qx qy qz qw sec nsec\n";
+  //slam_problem_filestream << "# This is the pose of the tag in the map frame\n";
+  slam_problem_filestream << "PLATFORM_ID "<< param_platform_id <<"\n";
+
+
+  for (size_t i=0; i < all_base_to_odom_.size(); i++){
+    IsometryWithTime pose = all_base_to_odom_[i];
+    const Eigen::Vector3d r = pose.pose.translation();
+    const Eigen::Quaterniond q(pose.pose.rotation());
+
+    std::stringstream ss6;
+    ss6 << "VERTEX_SE3:QUAT_TIME " << i << " "
+        << r[0] << " " << r[1] << " " << r[2] << " "
+        << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << " "
+        << pose.sec << " " << pose.nsec;
+    slam_problem_filestream << ss6.str() << "\n";
+  }
+
+  for (size_t i=1; i < all_base_to_odom_.size(); i++){
+    IsometryWithTime prev_pose = all_base_to_odom_[i-1];
+    IsometryWithTime curr_pose = all_base_to_odom_[i];
+    Eigen::Isometry3d pose_delta =  prev_pose.pose.inverse() * curr_pose.pose;
+
+    const Eigen::Vector3d r = pose_delta.translation();
+    const Eigen::Quaterniond q(pose_delta.rotation());
+
+    std::stringstream ss6;
+    ss6 << "EDGE_SE3:QUAT " << i-1 << " " << i << " "
+        << r[0] << " " << r[1] << " " << r[2] << " "
+        << q.x() << " " << q.y() << " " << q.z() << " " << q.w();
+    slam_problem_filestream << ss6.str() << "\n";
+  }
+
+
+  slam_problem_filestream.close();
+}
+
+
 
 
 bool App::writeMapRequest(std_srvs::Trigger::Request& request, std_srvs::Trigger::Response& response){
@@ -293,6 +427,7 @@ void App::pathCallBack(const nav_msgs::Path::ConstPtr &msg){
 
 
 void App::pointcloudCallback(const sensor_msgs::PointCloud2::ConstPtr &msg){
+  std::cout << "got cloud\n";
 
   Eigen::Isometry3d base_to_odom;
   IcpCloudType::Ptr cloud_raw_in_base = boost::make_shared<IcpCloudType>();
@@ -303,6 +438,9 @@ void App::pointcloudCallback(const sensor_msgs::PointCloud2::ConstPtr &msg){
     return;
   }
 
+
+  std::cout << "write this cloud\n";
+
 }
 
 
@@ -311,8 +449,10 @@ bool App::processLidar(const sensor_msgs::PointCloud2::ConstPtr& cloud_in,
                        IcpCloudType::Ptr& point_cloud_in_odometry,
                        Time& time, Eigen::Isometry3d &base_to_odom){
 
-  std::string param_odom_frame = "odom";
-  std::string param_odom_base_frame = "base";
+  std::string param_odom_frame = "odom_vilens";
+  std::string param_odom_base_frame = "base_vilens";
+
+  double param_reading_dist_threshold = 2.0;
 
   ros::Time msg_time(cloud_in->header.stamp.sec, cloud_in->header.stamp.nsec);
   time = {cloud_in->header.stamp.sec, cloud_in->header.stamp.nsec};
@@ -356,6 +496,15 @@ bool App::processLidar(const sensor_msgs::PointCloud2::ConstPtr& cloud_in,
   tf::transformTFToEigen(sensor_to_base_tf, sensor_to_base);
 
 
+  Eigen::Isometry3d pose_delta =  last_base_to_odom_.inverse() * base_to_odom;
+  double dist_travelled = pose_delta.translation().norm();
+
+  if (dist_travelled < param_reading_dist_threshold){
+    return false;
+  }
+
+  last_base_to_odom_ = base_to_odom;
+
   // Convert from ROS msg
   bool ros_msg_contains_normals = false;
   for (const sensor_msgs::PointField& f : cloud_in->fields) {
@@ -392,6 +541,27 @@ bool App::processLidar(const sensor_msgs::PointCloud2::ConstPtr& cloud_in,
   pcl::transformPointCloudWithNormals(*point_cloud_in_odometry, *point_cloud_in_odometry, sensor_to_odom.translation().cast<float>(),
                Eigen::Quaternionf(sensor_to_odom.rotation().cast<float>())); // transform filtered cloud into odometry frame
 
+
+  IsometryWithTime this_base_to_odom = IsometryWithTime(base_to_odom, time.sec, time.nsec, 0); // id not used here
+  all_base_to_odom_.push_back(this_base_to_odom);
+
+
+  Eigen::Vector4f pose_trans = Eigen::Vector4f::Zero();
+  pose_trans.block<3,1>(0,0) = base_to_odom.translation().cast<float>();
+  point_cloud_raw_in_base->sensor_origin_ = pose_trans;
+  point_cloud_raw_in_base->sensor_orientation_ = Eigen::Quaternionf(base_to_odom.rotation().cast<float>());
+
+
+  stringstream ss_pcdfile;
+  ss_pcdfile << data_directory_path_.str() << "/individual_clouds/cloud_" ;
+  ss_pcdfile << time.sec << "_";
+  ss_pcdfile << std::setw(9) << std::setfill('0') << time.nsec;
+  writePointCloud(ss_pcdfile.str(), *point_cloud_raw_in_base);
+
+  writeResult();
+
+
+
   return true;
 }
 
@@ -403,7 +573,7 @@ int main( int argc, char** argv ){
 
     CommandLineConfig cl_config;
     cl_config.max_range = 20.0;
-    cl_config.lidar_topic ="/os1_cloud_node/points";
+    cl_config.lidar_topic ="/vilens/point_cloud_transformed_processed";
     cl_config.path_topic = "/vilens_slam/slam_poses";
     cl_config.estimation_frame = "base";
     cl_config.add_cloud_every_n_poses = 1;
