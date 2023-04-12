@@ -21,6 +21,7 @@ struct CommandLineConfig
   string output_file_type;
   double reading_dist_threshold;
   int platform_id;
+  std::vector<double> odometry_info;
 };
 
 class App{
@@ -135,7 +136,13 @@ void App::writeResult() {
     std::stringstream ss6;
     ss6 << "EDGE_SE3:QUAT " << i-1 << " " << i << " "
         << r[0] << " " << r[1] << " " << r[2] << " "
-        << q.x() << " " << q.y() << " " << q.z() << " " << q.w();
+        << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << " "
+        << cl_config_.odometry_info[3] << " " << 0 << " " << 0 << " " << 0 << " " << 0 << " " << 0 << " " 
+        << cl_config_.odometry_info[4] << " " << 0 << " " << 0 << " " << 0 << " " << 0 << " "
+        << cl_config_.odometry_info[5] << " " << 0 << " " << 0 << " " << 0 << " "
+        << cl_config_.odometry_info[0] << " " << 0 << " " << 0 << " " 
+        << cl_config_.odometry_info[1] << " " << 0 << " " 
+        << cl_config_.odometry_info[2];
     slam_problem_filestream << ss6.str() << "\n";
   }
 
@@ -201,18 +208,17 @@ bool App::processLidar(const sensor_msgs::PointCloud2::ConstPtr& cloud_in,
   }
   tf::transformTFToEigen(sensor_to_base_tf, sensor_to_base);
 
-
+  // How much have you moved since last cloud output:
   Eigen::Isometry3d pose_delta =  last_base_to_odom_.inverse() * base_to_odom;
   double dist_travelled = pose_delta.translation().norm();
-
-  if (dist_travelled < cl_config_.reading_dist_threshold){
+  if (all_base_to_odom_.size()==0){
+    std::cout << "Write first cloud\n";
+  }else if (dist_travelled < cl_config_.reading_dist_threshold){
     return false;
   }
-
-  std::cout << "Write this cloud\n";
   last_base_to_odom_ = base_to_odom;
 
-  // Convert from ROS msg
+  // Convert from ROS msg to PCL and add normals
   bool ros_msg_contains_normals = false;
   for (const sensor_msgs::PointField& f : cloud_in->fields) {
     if (f.name == "normal_x") {
@@ -220,10 +226,6 @@ bool App::processLidar(const sensor_msgs::PointCloud2::ConstPtr& cloud_in,
       break;
     }
   }
-
-  // HACK for now:
-  pcl::fromROSMsg(*cloud_in, *point_cloud_in_odometry);
-  /*
   if (ros_msg_contains_normals) {
     pcl::fromROSMsg(*cloud_in, *point_cloud_in_odometry);
   } else {
@@ -233,7 +235,6 @@ bool App::processLidar(const sensor_msgs::PointCloud2::ConstPtr& cloud_in,
     pcl::copyPointCloud(*cloud_a, *point_cloud_in_odometry);
     calculateCloudNormalsVoxelized(point_cloud_in_odometry, Eigen::Vector3d::Zero());
   }
-  */
 
   // Remove long and short returns
   Eigen::Matrix4f tmp = Eigen::MatrixXf::Identity(4, 4);
@@ -242,23 +243,22 @@ bool App::processLidar(const sensor_msgs::PointCloud2::ConstPtr& cloud_in,
   }
   getPointsInOrientedBox(point_cloud_in_odometry, -cl_config_.max_range, cl_config_.max_range, tmp); // remove points outside a box (far from origin)
 
-  // transform point cloud to odometry frame
+  // transform point cloud to base and odometry frames
   pcl::transformPointCloudWithNormals(*point_cloud_in_odometry, *point_cloud_raw_in_base, sensor_to_base.translation().cast<float>(),
                Eigen::Quaternionf(sensor_to_base.rotation().cast<float>())); // transform raw cloud into <BASE> frame // TODO: this is identity usually, could skip
   pcl::transformPointCloudWithNormals(*point_cloud_in_odometry, *point_cloud_in_odometry, sensor_to_odom.translation().cast<float>(),
                Eigen::Quaternionf(sensor_to_odom.rotation().cast<float>())); // transform filtered cloud into odometry frame
 
-
+  // Cache pose list
   IsometryWithTime this_base_to_odom = IsometryWithTime(base_to_odom, time.sec, time.nsec, 0); // id not used here
   all_base_to_odom_.push_back(this_base_to_odom);
+  std::cout << "Write cloud " << all_base_to_odom_.size() << "\n";
 
-
+  // Write point clouds and poses
   Eigen::Vector4f pose_trans = Eigen::Vector4f::Zero();
   pose_trans.block<3,1>(0,0) = base_to_odom.translation().cast<float>();
-  point_cloud_raw_in_base->sensor_origin_ = pose_trans;
+  point_cloud_raw_in_base->sensor_origin_ = pose_trans; // put odometry pose into point cloud VIEWPOINT field
   point_cloud_raw_in_base->sensor_orientation_ = Eigen::Quaternionf(base_to_odom.rotation().cast<float>());
-
-
   stringstream ss_pcdfile;
   ss_pcdfile << data_directory_path_.str() << "/individual_clouds/cloud_" ;
   ss_pcdfile << time.sec << "_";
@@ -269,6 +269,23 @@ bool App::processLidar(const sensor_msgs::PointCloud2::ConstPtr& cloud_in,
   return true;
 }
 
+
+void getParamOrExit(const ros::NodeHandle &nh, const std::string &param_field, std::vector<double>& variable){
+  if(!nh.getParam(param_field, variable)){
+    std::cout << "Exiting. Couldn't find param: " << param_field << "\n";
+    exit(-1);
+  }
+
+  for (int i=0;i<variable.size();i++){
+    if(i==0){
+      std::cout << param_field << ": " << variable[i] << ", ";
+    }else if (i<variable.size()-1){
+      std::cout << variable[i] << ", ";
+    }else{
+      std::cout << variable[i] << " (vector" << variable.size() <<"d)\n";
+    }
+  }
+}
 
 int main( int argc, char** argv ){
   ros::init(argc, argv, "slam_logger");
@@ -283,6 +300,7 @@ int main( int argc, char** argv ){
   cl_config.output_file_type = "pcd";
   cl_config.reading_dist_threshold = 1.0;
   cl_config.platform_id = 1;
+  cl_config.odometry_info = {1e4, 1e4, 1e4, 1e6, 1e6, 1e6}; // order: roll, pitch, yaw, x, y, z
 
   nh.getParam("min_range", cl_config.min_range);
   nh.getParam("max_range", cl_config.max_range);
@@ -292,6 +310,7 @@ int main( int argc, char** argv ){
   nh.getParam("output_file_type", cl_config.output_file_type);
   nh.getParam("reading_dist_threshold", cl_config.reading_dist_threshold);
   nh.getParam("platform_id", cl_config.platform_id);
+  getParamOrExit(nh, "odometry_info", cl_config.odometry_info);
 
   std::shared_ptr<App> app = std::make_shared<App>(nh, cl_config);
   ros::Subscriber lidar_sub = nh.subscribe(cl_config.lidar_topic, 100, &App::pointcloudCallback, app.get());

@@ -6,17 +6,27 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/common/transforms.h>
 #include <pcl/io/ply_io.h>
+#include <pcl/filters/voxel_grid.h>
 
 using IcpPointType = pcl::PointXYZINormal;
 using IcpCloudType = pcl::PointCloud<IcpPointType>;
 
-void getPointsInOrientedBox(IcpCloudType::Ptr& cloud, float min, float max,
-                            Eigen::Matrix4f& origin, bool negative = false);
 
 std::string getEnvVar( std::string const & key );
 
 std::string getTimeAsString();
 
+void getPointsInOrientedBox(IcpCloudType::Ptr& cloud, float min, float max,
+                            Eigen::Matrix4f& origin, bool negative = false);
+
+void calculateCloudNormals(IcpCloudType::Ptr& cloud,
+                           const Eigen::Vector3d& sensorOrigin);
+
+void calculateCloudNormalsVoxelized(IcpCloudType::Ptr& cloud,
+                                    const Eigen::Vector3d& sensorOrigin,
+                                    const double leafSize = 0.20);
+
+bool areNormalsSet(const IcpCloudType::ConstPtr &cloud);
 
 // Time data structure (not to be confused with ros::Time)
 struct Time
