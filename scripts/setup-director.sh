@@ -20,13 +20,14 @@ read -p "Press enter to continue"
 sudo apt-key add drs_packages_server_public.key
 sudo add-apt-repository "deb http://drs-packages.robots.ox.ac.uk $(lsb_release -s -c) main"
 sudo apt update
-sudo apt install ros-noetic-ctk-python-console ros-noetic-python-qt ros-noetic-qt-property-browser ros-noetic-pcl-plugin -y
+sudo apt install ros-noetic-ctk-python-console ros-noetic-python-qt ros-noetic-qt-property-browser -y
 
 
 # director
 echo "Cloning director "
 echo "Requires numpy <= 1.23.4"
 read -p "Press enter to continue"
+git clone https://github.com/ori-drs/PointCloudLibraryPlugin
 git clone https://github.com/ori-drs/director_digiforest.git
 git clone https://github.com/ori-drs/director.git
 git clone https://github.com/ori-drs/vtk_ros.git
