@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import digiforest_drs as df
+import digiforest_analysis.terrain_mapping as df
 import sys
 
 if __name__ == '__main__':
