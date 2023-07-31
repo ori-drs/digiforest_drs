@@ -34,16 +34,8 @@ gdown https://drive.google.com/uc?id=1zv2OO3tSRGvyNLqUt-R-gJYHAwodA3wW
 pip install python_pcl-0.3.0rc1-cp38-cp38-linux_x86_64.whl && rm python_pcl-0.3.0rc1-cp38-cp38-linux_x86_64.whl
 ```
 
-### Formatting
-
-We use black for formatting and flake8 for linting, it should be installed as part of the `requirements.txt`
-
-### Code formatting
+Install the automatic formatting pre-commit hooks (black and flake8), which will check the code before each commit:
 
 ```sh
-# for formatting
-black --line-length 120 .
-
-# for checking lints
-flake8 .
+pre-commit install
 ```
