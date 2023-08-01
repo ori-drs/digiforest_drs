@@ -3,8 +3,10 @@
 [flake8]
 # Recommend matching the black line length (default 88),
 # rather than using the flake8 default of 79:
-#ignore=E402,E501,W503
-$extend-ignore = E203
 max-line-length = 88
+
 max-complexity = 18
 exclude=_*,.vscode,.git
+
+#ignore=E402,E501,W503
+#extend-ignore = E203
