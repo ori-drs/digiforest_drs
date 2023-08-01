@@ -14,17 +14,17 @@ Authors: Benoit Casseau, Matias Mattamala, Nived Chebrolu, Maurice Fallon
 
 ### Setup
 
-Use a virtual environment (named `env` in the example):
+Use a virtual environment (`env` in the example), isolated from the system dependencies:
 
 ```sh
-python3 -m venv env --system-site-packages 
+python3 -m venv env
 source env/bin/activate
 ```
 
 Install the dependencies:
 
 ```sh
-pip install requirements.txt
+pip install -r requirements.txt
 ```
 
 Install `python-pcl` (custom DRS build for PCL 1.10, not available on pypi):
