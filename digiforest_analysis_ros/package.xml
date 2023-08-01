@@ -4,7 +4,7 @@
   <version>0.0.0</version>
   <description>The digiforest_analysis_ros package</description>
 
-  <maintainer email="mfallon@todo.todo">mfallon</maintainer>
+  <maintainer email="matias@robots.ox.ac.uk">Matias Mattamala</maintainer>
 
   <license>TODO</license>
 
@@ -12,6 +12,9 @@
   <depend>pcl_conversions</depend>
   <depend>pcl_ros</depend>
   <depend>tf_conversions</depend>
+  <depend>vilens_msgs</depend>
+  <depend>vilens_slam_msgs</depend>
+
   <export>
   </export>
 </package>
