@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.0.2)
 project(digiforest_analysis_ros)
 
 find_package(catkin REQUIRED COMPONENTS
@@ -6,6 +6,7 @@ find_package(catkin REQUIRED COMPONENTS
   tf_conversions
 )
 
+catkin_python_setup()
 
 catkin_package(
   # INCLUDE_DIRS
@@ -20,8 +21,8 @@ catkin_package(
 ###########
 ## Python #
 ###########
-catkin_python_setup()
-catkin_install_python(PROGRAMS scripts/mission_analysis_node.py         
+
+catkin_install_python(PROGRAMS scripts/mission_analysis_node.py   
                       DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
 
 
