@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>digiforest_analysis</name>
+  <version>0.0.0</version>
+  <description>The digiforest_analysis package</description>
+
+  <maintainer email="mfallon@todo.todo">mfallon</maintainer>
+
+  <license>TODO</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>pcl_conversions</depend>
+  <depend>pcl_ros</depend>
+  <depend>tf_conversions</depend>
+  <export>
+  </export>
+</package>

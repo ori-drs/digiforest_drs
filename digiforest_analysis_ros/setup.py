@@ -2,8 +2,7 @@ from distutils.core import setup
 from catkin_pkg.python_setup import generate_distutils_setup
 
 d = generate_distutils_setup(
-    packages=['digiforest_drs'],
-    package_dir={'': 'src'}
+    packages=["digiforest_analysis_ros"], package_dir={"": "src"}
 )
 
 setup(**d)

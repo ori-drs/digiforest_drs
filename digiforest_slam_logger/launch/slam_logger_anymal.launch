@@ -1,0 +1,15 @@
+<?xml version="1.0" ?>
+<launch>
+  <node name="slam_logger_node" pkg="digiforest_drs" type="slam_logger_node" output="screen">
+    <param name="lidar_topic"                 type="string" value="/point_cloud_filter/lidar/point_cloud_filtered" />
+
+    <param name="odom_frame"                  type="string" value="map" />
+    <param name="odom_base_frame"             type="string" value="lidar" />
+
+    <param name="output_file_type"            type="string" value="pcd" />
+    <param name="reading_dist_threshold"      type="double" value="2.0" />
+    <param name="platform_id"                 type="int"    value="1" />
+
+    <param name="odometry_info"               type="yaml"   value="[1.e+4, 1.e+4, 1.e+4, 1.e+6, 1.e+6, 1.e+6]" />
+  </node>
+</launch>

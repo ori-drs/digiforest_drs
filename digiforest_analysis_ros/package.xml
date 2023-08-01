@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <package format="2">
-  <name>digiforest_drs</name>
+  <name>digiforest_analysis_ros</name>
   <version>0.0.0</version>
-  <description>The digiforest_drs package</description>
+  <description>The digiforest_analysis_ros package</description>
 
   <maintainer email="mfallon@todo.todo">mfallon</maintainer>
 

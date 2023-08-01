@@ -144,7 +144,7 @@ def generate_height_maps(directory, output_dir):
         height_map_filename = "height_map_"+s[1]+"_"+s[2]+".ply"
 
         generate_height_map(file)
-        os.system("rosrun digiforest_drs generate_mesh") #TODO improve
+        os.system("rosrun digiforest_analysis generate_mesh") #TODO improve
 
         if not os.path.isdir(output_dir):
             try:
