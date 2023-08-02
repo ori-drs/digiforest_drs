@@ -11,6 +11,7 @@
   <buildtool_depend>catkin</buildtool_depend>
   <depend>pcl_conversions</depend>
   <depend>pcl_ros</depend>
+  <depend>ros2raw</depend>
   <depend>tf_conversions</depend>
   <depend>vilens_msgs</depend>
   <depend>vilens_slam_msgs</depend>

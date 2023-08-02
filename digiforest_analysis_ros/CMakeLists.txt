@@ -13,6 +13,7 @@ catkin_package(
   #   include
   CATKIN_DEPENDS 
     pcl_ros
+    ros2raw
     tf_conversions
     vilens_msgs
     vilens_slam_msgs
