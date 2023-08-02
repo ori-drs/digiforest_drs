@@ -1,0 +1,25 @@
+<?xml version="1.0" ?>
+<launch>
+  <!-- Folder to look for data -->
+  <arg name="input_folder" default="$(env HOME)/vilens_slam_data/online_slam_output/"/>
+  <arg name="output_folder" default="" />
+
+  <!--
+  The output_frame can be either:
+  "map" - typical slam frame, with the start at [0,0,0] origin
+  "GNSS_EPSG3067" - Finland
+  "GNSS_EPSG25833" - 33N Germany
+  "GNSS_EPSG25832" - 32N Switzerland
+  "GNSS_EPSG25830" - 30N UK
+  The folder name is either payload_in_map or payload_in_gnss
+  -->
+  <arg name="output_frame" default="GNSS_EPSG3067"/>
+  <arg name="tile_size" default="20.0"/>
+
+  <node name="generate_tiles" pkg="digiforest_tiling" type="generate_tiles" output="screen">
+    <param name="input_folder" value="$(arg input_folder)" />
+    <param name="output_folder" value="$(arg output_folder)"/>
+    <param name="output_frame" value="$(arg output_frame)"/>
+    <param name="tile_size" value="$(arg tile_size)"/>
+  </node>
+</launch>
