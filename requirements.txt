@@ -2,3 +2,6 @@ pre-commit
 gdown
 numpy
 Cython
+matplotlib
+pandas
+seaborn
