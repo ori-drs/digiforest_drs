@@ -6,11 +6,9 @@ import rospy
 import tf2_ros
 
 from datetime import datetime
-from geometry_msgs.msg import TwistStamped
-from vilens_msgs.msg import State
-from vilens_slam_msgs.msg import PoseGraph
-
-from ros2raw.converters import TwistStampedConverter
+from geometry_msgs.msg import TwistStamped, TwistWithCovarianceStamped
+from nav_msgs.msg import Path
+from ros2raw.converters import TwistStampedConverter, PathConverter
 
 
 class MissionAnalysis:
@@ -27,13 +25,11 @@ class MissionAnalysis:
         """Read parameters from parameter server"""
 
         # Subscription topics
-        self._vilens_graph_topic = rospy.get_param(
-            "~vilens_graph_topic", "/vilens_slam/pose_graph"
+        self._slam_graph_topic = rospy.get_param(
+            "~slam_graph_topic", "/vilens_slam/slam_poses"
         )
 
-        self._vilens_state_topic = rospy.get_param(
-            "~vilens_state_topic", "/vilens/state_optimized"
-        )
+        self._state_twist = rospy.get_param("~twist_topic", "/vilens/twist_optimized")
 
         # Optional topics
         self._operator_twist_topic = rospy.get_param(
@@ -50,11 +46,11 @@ class MissionAnalysis:
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer)
 
         # Subscribers
-        self._sub_vilens_graph = rospy.Subscriber(
-            self._vilens_graph_topic, PoseGraph, self.vilens_slam_graph_callback
+        self._sub_slam_graph = rospy.Subscriber(
+            self._slam_graph_topic, Path, self.slam_graph_callback
         )
-        self._sub_vilens_state = rospy.Subscriber(
-            self._vilens_state_topic, State, self.vilens_state_callback
+        self._sub_state_twist = rospy.Subscriber(
+            self._state_twist, TwistWithCovarianceStamped, self.state_twist_callback
         )
 
         # Optional
@@ -66,37 +62,46 @@ class MissionAnalysis:
 
     def set_internals(self):
         """Set up internal variables"""
-        self._last_vilens_graph = None
+        self._last_slam_graph = None
 
         # Output folder
         self.make_mission_report_folder()
 
         # Set converters
-        self._state_twist_converter = TwistStampedConverter(
+        self._slam_graph_converter = PathConverter(
+            output_folder=self.output_folder,
+            label="states",
+            prefix="slam_graph",
+            only_keep_last=True,
+        )
+
+        self._twist_converter = TwistStampedConverter(
             output_folder=self.output_folder,
             label="states",
             prefix="state_twist",
-            tf_handler=self._tf_buffer,
-            tf=["odom", "map"],
         )
 
         self._operator_twist_converter = TwistStampedConverter(
             output_folder=self.output_folder,
             label="states",
             prefix="operator_twist",
-            tf_handler=self._tf_buffer,
-            tf=["odom", "map"],
         )
 
     # Callbacks
-    def vilens_slam_graph_callback(self, msg: PoseGraph):
-        self._last_vilens_graph = msg
+    def slam_graph_callback(self, msg: Path):
+        rospy.loginfo_throttle(10, "Logging SLAM graph...")
+        self._last_slam_graph = msg
 
-    def vilens_state_callback(self, msg: State):
+    def state_twist_callback(self, msg: TwistWithCovarianceStamped):
+        rospy.loginfo_throttle(10, "Logging state twist...")
         # Save velocity to file
-        self._state_twist_converter.save(msg)
+        twist = TwistStamped()
+        twist.header = msg.header
+        twist.twist = msg.twist.twist
+        self._twist_converter.save(twist)
 
     def operator_twist_callback(self, msg: TwistStamped):
+        rospy.loginfo_throttle(10, "Logging operator twist...")
         # Save velocity to file
         self._operator_twist_converter.save(msg)
 
@@ -124,6 +129,10 @@ class MissionAnalysis:
     def shutdown_routine(self, *args):
         """Executes the operations before killing the mission analysis procedures"""
         rospy.logwarn("Analyzing mission data, please wait...")
+
+        # Save slam graph
+        rospy.loginfo("Saving SLAM graph")
+        self._slam_graph_converter.save(self._last_slam_graph)
 
         # Re-read the raw files
 
