@@ -6,9 +6,20 @@ import rospy
 import tf2_ros
 
 from datetime import datetime
-from geometry_msgs.msg import TwistStamped, TwistWithCovarianceStamped
+from dynamic_reconfigure.msg import Config
+from geometry_msgs.msg import (
+    PoseStamped,
+    PoseWithCovarianceStamped,
+    TwistStamped,
+    TwistWithCovarianceStamped,
+)
 from nav_msgs.msg import Path
-from ros2raw.converters import TwistStampedConverter, PathConverter
+from ros2raw.converters import (
+    PathConverter,
+    PoseStampedConverter,
+    TransformStampedConverter,
+    TwistStampedConverter,
+)
 
 
 class MissionAnalysis:
@@ -30,13 +41,32 @@ class MissionAnalysis:
         )
 
         self._state_twist = rospy.get_param("~twist_topic", "/vilens/twist_optimized")
+        self._state_pose = rospy.get_param("~pose_topic", "/vilens/pose_optimized")
 
         # Optional topics
+        self._reference_twist_topic = rospy.get_param(
+            "~reference_twist_topic", "/local_guidance_path_follower/twist"
+        )
+
         self._operator_twist_topic = rospy.get_param(
             "~operator_twist_topic", "/motion_reference/command_twist"
         )
 
-        self._tf_frames = rospy.get_param("~tf_frames_topic", ["base"])
+        self._local_planner_param_topic = rospy.get_param(
+            "~local_planner_param_topic", "/field_local_planner/parameter_updates"
+        )
+
+        self._rmp_param_topic = rospy.get_param(
+            "~rmp_param_topic", "/field_local_planner/rmp/parameter_updates"
+        )
+
+        self._tf_reference_frames = rospy.get_param(
+            "~tf_reference_frames", ["base_vilens", "map_vilens"]
+        )
+
+        self._tf_query_frames = rospy.get_param(
+            "~tf_query_frames", ["LF_FOOT", "RF_FOOT", "LH_FOOT", "RH_FOOT"]
+        )
 
     def setup_ros(self):
         """Set up all ROS-related stuff"""
@@ -49,15 +79,41 @@ class MissionAnalysis:
         self._sub_slam_graph = rospy.Subscriber(
             self._slam_graph_topic, Path, self.slam_graph_callback
         )
+        self._sub_state_pose = rospy.Subscriber(
+            self._state_pose, PoseWithCovarianceStamped, self.state_pose_callback
+        )
         self._sub_state_twist = rospy.Subscriber(
             self._state_twist, TwistWithCovarianceStamped, self.state_twist_callback
         )
 
         # Optional
+        self._sub_reference_twist = rospy.Subscriber(
+            self._reference_twist_topic,
+            TwistStamped,
+            self.reference_twist_callback,
+        )
+
         self._sub_operator_twist = rospy.Subscriber(
             self._operator_twist_topic,
             TwistStamped,
             self.operator_twist_callback,
+        )
+
+        self._sub_local_planner_param = rospy.Subscriber(
+            self._local_planner_param_topic,
+            Config,
+            self.local_planner_param_callback,
+        )
+
+        self._sub_rmp_param = rospy.Subscriber(
+            self._rmp_param_topic,
+            Config,
+            self.rmp_param_callback,
+        )
+
+        # Set tf subscriber timer
+        self._sub_tf_timer = rospy.Timer(
+            rospy.Duration(secs=1 / 20), self.tf_frames_callback
         )
 
     def set_internals(self):
@@ -75,10 +131,22 @@ class MissionAnalysis:
             only_keep_last=True,
         )
 
+        self._pose_converter = PoseStampedConverter(
+            output_folder=self.output_folder,
+            label="states",
+            prefix="state_pose",
+        )
+
         self._twist_converter = TwistStampedConverter(
             output_folder=self.output_folder,
             label="states",
             prefix="state_twist",
+        )
+
+        self._reference_twist_converter = TwistStampedConverter(
+            output_folder=self.output_folder,
+            label="states",
+            prefix="reference_twist",
         )
 
         self._operator_twist_converter = TwistStampedConverter(
@@ -87,27 +155,60 @@ class MissionAnalysis:
             prefix="operator_twist",
         )
 
+        self._tf_converter = {}
+        for parent in self._tf_reference_frames:
+            for child in self._tf_query_frames:
+                prefix = f"{parent}_{child}"
+                self._tf_converter[prefix] = TransformStampedConverter(
+                    output_folder=self.output_folder, label="states", prefix=prefix
+                )
+
     # Callbacks
     def slam_graph_callback(self, msg: Path):
-        rospy.loginfo_throttle(10, "Logging SLAM graph...")
+        rospy.loginfo_throttle(60, "Logging SLAM graph...")
         self._last_slam_graph = msg
 
+    def state_pose_callback(self, msg: PoseWithCovarianceStamped):
+        rospy.loginfo_throttle(60, "Logging state pose...")
+        pose = PoseStamped()
+        pose.header = msg.header
+        pose.pose = msg.pose.pose
+        self._pose_converter.save(pose)
+
     def state_twist_callback(self, msg: TwistWithCovarianceStamped):
-        rospy.loginfo_throttle(10, "Logging state twist...")
-        # Save velocity to file
+        rospy.loginfo_throttle(60, "Logging state twist...")
         twist = TwistStamped()
         twist.header = msg.header
         twist.twist = msg.twist.twist
         self._twist_converter.save(twist)
 
+    def tf_frames_callback(self, msg):
+        rospy.loginfo_throttle(60, "Logging TFs...")
+        now = rospy.Time(0)
+        for parent in self._tf_reference_frames:
+            for child in self._tf_query_frames:
+                try:
+                    pose = self._tf_buffer.lookup_transform(
+                        parent, child, now, timeout=rospy.Duration(0.1)
+                    )
+                    prefix = f"{parent}_{child}"
+                    self._tf_converter[prefix].save(pose)
+                except Exception as e:
+                    rospy.logwarn(e)
+
+    def reference_twist_callback(self, msg: TwistStamped):
+        rospy.loginfo_throttle(60, "Logging reference twist...")
+        self._reference_twist_converter.save(msg)
+
     def operator_twist_callback(self, msg: TwistStamped):
-        rospy.loginfo_throttle(10, "Logging operator twist...")
-        # Save velocity to file
+        rospy.loginfo_throttle(60, "Logging operator twist...")
         self._operator_twist_converter.save(msg)
 
-    def tf_frames_callback(self, msg):
-        # Save requested frames to file
-        pass
+    def local_planner_param_callback(self, msg: Config):
+        rospy.loginfo_throttle(60, "Logging local planner param config changes...")
+
+    def rmp_param_callback(self, msg: Config):
+        rospy.loginfo_throttle(60, "Logging local planner RMP param config changes...")
 
     # Other methods
     def make_mission_report_folder(self):
