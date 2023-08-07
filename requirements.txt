@@ -1,3 +1,4 @@
+wheel
 pre-commit
 gdown
 numpy
