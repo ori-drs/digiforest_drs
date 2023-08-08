@@ -17,6 +17,7 @@ from nav_msgs.msg import Path
 from ros2raw.converters import (
     PathConverter,
     PoseStampedConverter,
+    ROSMsgConverter,
     TransformStampedConverter,
     TwistStampedConverter,
 )
@@ -155,6 +156,18 @@ class MissionAnalysis:
             prefix="operator_twist",
         )
 
+        self._local_planner_param_converter = ROSMsgConverter(
+            output_folder=self.output_folder,
+            label="states",
+            prefix="local_planner_param",
+        )
+
+        self._rmp_param_converter = ROSMsgConverter(
+            output_folder=self.output_folder,
+            label="states",
+            prefix="rmp_param",
+        )
+
         self._tf_converter = {}
         for parent in self._tf_reference_frames:
             for child in self._tf_query_frames:
@@ -206,9 +219,11 @@ class MissionAnalysis:
 
     def local_planner_param_callback(self, msg: Config):
         rospy.loginfo_throttle(60, "Logging local planner param config changes...")
+        self._local_planner_param_converter.save(msg, stamp=rospy.Time.now())
 
     def rmp_param_callback(self, msg: Config):
         rospy.loginfo_throttle(60, "Logging local planner RMP param config changes...")
+        self._rmp_param_converter.save(msg, stamp=rospy.Time.now())
 
     # Other methods
     def make_mission_report_folder(self):
@@ -224,7 +239,8 @@ class MissionAnalysis:
 
         # Make symlink to latest
         latest_path = os.path.join(home_path, "digiforest_mission_data/latest")
-        os.unlink(latest_path)
+        if os.path.exists(latest_path):
+            os.unlink(latest_path)
         os.symlink(self.output_folder, latest_path)
 
     def shutdown_routine(self, *args):
