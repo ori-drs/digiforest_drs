@@ -1,4 +1,13 @@
+wheel
 pre-commit
 gdown
 numpy
+scipy
+scikit-learn
 Cython
+matplotlib
+pandas
+seaborn
+shapely
+pyyaml
+ipympl
