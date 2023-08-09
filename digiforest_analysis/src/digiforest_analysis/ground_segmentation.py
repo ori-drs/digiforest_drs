@@ -25,11 +25,11 @@ class GroundSegmentation:
         # TODO necessary?
         ground_cloud = self.remove_normals(ground_cloud)
         forest_cloud = self.remove_normals(forest_cloud)
-
-        return ground_cloud, forest_cloud
         
         # get the terrain height
-        #heights_array_raw = df.getTerrainHeight(cloud)
-        #terrain_cloud = pcl.PointCloud()
-        #terrain_cloud.from_list(heights_array_raw)
+        heights_array_raw = df.getTerrainCloud(ground_cloud)
+        ground_cloud = pcl.PointCloud()
+        ground_cloud.from_list(heights_array_raw)
+
+        return ground_cloud, forest_cloud
         

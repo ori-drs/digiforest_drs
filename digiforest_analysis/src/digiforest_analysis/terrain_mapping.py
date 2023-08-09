@@ -8,7 +8,7 @@ import pcl
 import shutil
 import os
 
-def cropBox(cloud: pcl.PointCloud, midpoint, boxsize):
+def cropBox(cloud: pcl.PointCloud, midpoint, boxsize) -> pcl.PointCloud:
     clipper = cloud.make_cropbox()
     outcloud = pcl.PointCloud()
     tx = 0
@@ -109,6 +109,69 @@ def getTerrainHeight(p: pcl.PointCloud) -> NDArray[float64]:
             X = np.append(X, [[xx, yy, height]], axis=0)
 
     return X
+
+def getTerrainCloud(p: pcl.PointCloud) -> NDArray[float64]:
+    # input is a PCLXYZ
+    # output is an np.array of points [x,y,z]
+
+    # number of cells is (cloud_boxsize/cell_size) squared
+    cloud_boxsize = 80
+    cell_size = 2.0
+    cloud_midpoint_round = np.round(np.mean(p, 0) / cell_size) * cell_size
+
+    d_x = np.arange(
+        cloud_midpoint_round[0] - cloud_boxsize / 2,
+        cloud_midpoint_round[0] + cloud_boxsize / 2,
+        cell_size,
+    )
+    d_y = np.arange(
+        cloud_midpoint_round[1] - cloud_boxsize / 2,
+        cloud_midpoint_round[1] + cloud_boxsize / 2,
+        cell_size,
+    )
+    X = np.empty(shape=[0, 3])
+
+    for xx in d_x:
+        for yy in d_y:
+            cell_midpoint = np.array([xx, yy, 0])
+            pBox = cropBox(p, cell_midpoint, cell_size)
+            if pBox.size > 100:
+                seg = pBox.make_segmenter_normals(ksearch=50)
+                seg.set_optimize_coefficients(True)
+                seg.set_model_type(pcl.SACMODEL_NORMAL_PLANE)
+                seg.set_method_type(pcl.SAC_RANSAC)
+                seg.set_distance_threshold(0.01)
+                seg.set_normal_distance_weight(0.01)
+                seg.set_max_iterations(100)
+                indices, coefficients = seg.segment()
+                if len(coefficients) == 4:
+                    # plane fitting worked
+                    # keep point that are close to the plane
+                    points = pBox.to_array()
+                    print("plane found", len(indices))
+                    for point in points:
+                        dist = point_plane_distance(
+                            coefficients[0],
+                            coefficients[1],
+                            coefficients[2],
+                            coefficients[3],
+                            point,
+                        )
+                        if dist < 0.2:
+                            X = np.append(X, [point], axis=0)
+
+
+    return X
+
+def point_plane_distance(a, b, c, d, point):
+    normal = np.array([a, b, c])
+
+    # Calculate the distance using the formula
+    numerator = abs(np.dot(point, normal) + d)
+    denominator = np.linalg.norm(normal)
+
+    distance = numerator / denominator
+    return distance
 
 def load(filename: str):
     p = pcl.load(filename)
