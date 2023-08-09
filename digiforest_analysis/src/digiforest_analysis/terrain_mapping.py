@@ -1,12 +1,14 @@
 #!/usr/bin/env python
 import numpy as np
+from numpy.typing import NDArray
+from numpy import float64
+from typing import Tuple
 import pcl
 
 import shutil
 import os
 
-
-def cropBox(cloud, midpoint, boxsize):
+def cropBox(cloud: pcl.PointCloud, midpoint, boxsize):
     clipper = cloud.make_cropbox()
     outcloud = pcl.PointCloud()
     tx = 0
@@ -29,16 +31,16 @@ def cropBox(cloud, midpoint, boxsize):
     outcloud = clipper.filter()
     return outcloud
 
-
-def filterUpNormal(x, upthreshold, keepUp=True):
+def filterUpNormal(x: pcl.PointCloud_PointNormal, upthreshold: float, keepUp=True) -> pcl.PointCloud_PointNormal:
     # filter out not-up points from PCLXYZNormal
+    cloud_filtered = pcl.PointCloud_PointNormal()
     xy_dat = x.to_array()
     if keepUp:
         x_displayed = xy_dat[(xy_dat[:, 5] > upthreshold)]
     else:
-        x_displayed = xy_dat[(xy_dat[:, 5] < upthreshold)]
-    x.from_array(x_displayed)
-    return x
+        x_displayed = xy_dat[(xy_dat[:, 5] <= upthreshold)]
+    cloud_filtered.from_array(x_displayed)
+    return cloud_filtered
 
 
 def getMinimumHeight(pBox):
@@ -68,13 +70,12 @@ def getRobustHeight(pBox):
 
     return robust_height
 
-
-def getTerrainHeight(p):
+def getTerrainHeight(p: pcl.PointCloud) -> NDArray[float64]:
     # input is a PCLXYZ
     # output is an np.array of points [x,y,z]
 
-    # p = filterUpNormal(p)
-    print(p.size)
+    #p = filterUpNormal(p)
+    #print (p.size)
 
     # number of cells is (cloud_boxsize/cell_size) squared
     cloud_boxsize = 80
@@ -109,13 +110,11 @@ def getTerrainHeight(p):
 
     return X
 
-
-def load(filename):
+def load(filename: str):
     p = pcl.load(filename)
     return p
 
-
-def generate_height_map(filename):
+def generate_height_map(filename: str):
     cloud_pc = pcl.PointCloud_PointNormal()
     cloud_pc._from_pcd_file(filename.encode("utf-8"))
 
@@ -134,7 +133,7 @@ def generate_height_map(filename):
     pcd.to_file(b"/tmp/height_map.pcd")
 
 
-def generate_height_maps(directory, output_dir):
+def generate_height_maps(directory: str, output_dir: str):
 
     if not os.path.isdir(directory):
         print("Cannot find the folder", directory)
