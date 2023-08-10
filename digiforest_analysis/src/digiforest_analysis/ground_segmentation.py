@@ -32,7 +32,7 @@ class GroundSegmentation:
         distance = numerator / denominator
         return distance
 
-    def getTerrainCloud(self, p: pcl.PointCloud) -> NDArray[float64]:
+    def compute_ground_cloud(self, p: pcl.PointCloud) -> NDArray[float64]:
         """
         filter the points of the input cloud and return the points that are
         on the ground
@@ -98,7 +98,7 @@ class GroundSegmentation:
         ground_cloud = self.remove_normals(ground_cloud)
 
         # get the terrain height
-        ground_array = self.getTerrainCloud(ground_cloud)
+        ground_array = self.compute_ground_cloud(ground_cloud)
         ground_cloud = pcl.PointCloud()
         ground_cloud.from_list(ground_array)
 
