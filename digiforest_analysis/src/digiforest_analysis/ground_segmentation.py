@@ -52,7 +52,7 @@ class GroundSegmentation:
             cloud_midpoint_round[1] + cloud_boxsize / 2,
             cell_size,
         )
-        X = np.empty(shape=[0, 3])
+        X = np.empty(shape=[0, 3], dtype=np.float32)
 
         for xx in d_x:
             for yy in d_y:
@@ -87,22 +87,35 @@ class GroundSegmentation:
         return X
 
     def generate_height_map(self) -> Tuple[pcl.PointCloud, pcl.PointCloud]:
-        cloud_pc = pcl.PointCloud_PointNormal()
-        cloud_pc._from_pcd_file(self.cloud_filename.encode("utf-8"))
+        cloud = pcl.PointCloud_PointNormal()
+        cloud._from_pcd_file(self.cloud_filename.encode("utf-8"))
 
         # remove non-up points
-        ground_cloud = df.filterUpNormal(cloud_pc, 0.95)
-
-        forest_cloud = df.filterUpNormal(cloud_pc, 0.95, keepUp=False)
+        ground_cloud = df.filterUpNormal(cloud, 0.95)
 
         # drop from xyznormal to xyz
-        # TODO necessary?
         ground_cloud = self.remove_normals(ground_cloud)
-        forest_cloud = self.remove_normals(forest_cloud)
 
         # get the terrain height
-        heights_array_raw = self.getTerrainCloud(ground_cloud)
+        ground_array = self.getTerrainCloud(ground_cloud)
         ground_cloud = pcl.PointCloud()
-        ground_cloud.from_list(heights_array_raw)
+        ground_cloud.from_list(ground_array)
+
+        # get forest cloud
+        # remove points of cloud that are in ground_cloud
+        cloud = self.remove_normals(cloud)
+        cloud_array = cloud.to_array()
+        cloud_pts = cloud_array.view([("", cloud_array.dtype)] * cloud_array.shape[1])
+        ground_pts = ground_array.view(
+            [("", ground_array.dtype)] * ground_array.shape[1]
+        )
+        forest_array = (
+            np.setdiff1d(cloud_pts, ground_pts)
+            .view(cloud_array.dtype)
+            .reshape(-1, cloud_array.shape[1])
+        )
+
+        forest_cloud = pcl.PointCloud()
+        forest_cloud.from_array(forest_array)
 
         return ground_cloud, forest_cloud
