@@ -9,6 +9,8 @@ from numpy import float64
 class GroundSegmentation:
     def __init__(self, cloud_filename: str):
         self.cloud_filename = cloud_filename
+        self.max_distance_to_plane = 0.5
+        self.cell_size = 4.0
 
     def remove_normals(self, cloud: pcl.PointCloud_PointNormal) -> pcl.PointCloud:
         array_xyz = cloud.to_array()[:, 0:3]
@@ -39,25 +41,24 @@ class GroundSegmentation:
 
         # number of cells is (cloud_boxsize/cell_size) squared
         cloud_boxsize = 80
-        cell_size = 4.0
-        cloud_midpoint_round = np.round(np.mean(p, 0) / cell_size) * cell_size
+        cloud_midpoint_round = np.round(np.mean(p, 0) / self.cell_size) * self.cell_size
 
         d_x = np.arange(
             cloud_midpoint_round[0] - cloud_boxsize / 2,
             cloud_midpoint_round[0] + cloud_boxsize / 2,
-            cell_size,
+            self.cell_size,
         )
         d_y = np.arange(
             cloud_midpoint_round[1] - cloud_boxsize / 2,
             cloud_midpoint_round[1] + cloud_boxsize / 2,
-            cell_size,
+            self.cell_size,
         )
         X = np.empty(shape=[0, 3], dtype=np.float32)
 
         for xx in d_x:
             for yy in d_y:
                 cell_midpoint = np.array([xx, yy, 0])
-                pBox = df.cropBox(p, cell_midpoint, cell_size)
+                pBox = df.cropBox(p, cell_midpoint, self.cell_size)
                 if pBox.size > 100:
                     # plane fitting
                     seg = pBox.make_segmenter_normals(ksearch=50)
@@ -81,7 +82,7 @@ class GroundSegmentation:
                                 coefficients[3],
                                 point,
                             )
-                            if dist < 0.5:
+                            if dist < self.max_distance_to_plane:
                                 X = np.append(X, [point], axis=0)
 
         return X
