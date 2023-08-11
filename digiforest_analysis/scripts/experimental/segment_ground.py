@@ -53,7 +53,6 @@ if __name__ == "__main__":
         # Open3D
         import open3d as o3d
 
-        ply_point_cloud = o3d.data.PLYPointCloud()
         pcd = o3d.io.read_point_cloud(sys.argv[1])
         assert pcd.has_normals()
 

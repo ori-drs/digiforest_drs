@@ -2,7 +2,6 @@ import pcl
 import numpy as np
 from numpy.typing import NDArray
 from numpy import float64
-import time
 
 
 class GroundSegmentation:
@@ -173,7 +172,7 @@ class GroundSegmentation:
                             coefficients[3],
                             points,
                         )
-                        idx = dist < self.max_distance_to_plane
+                        idx = dist < self._max_distance_to_plane
                         idx = idx.flatten()  # make it a row vector
                         X = np.append(X, points[idx], axis=0)
 
