@@ -2,6 +2,7 @@ import pcl
 import numpy as np
 from numpy.typing import NDArray
 from numpy import float64
+import time
 
 
 class GroundSegmentation:
