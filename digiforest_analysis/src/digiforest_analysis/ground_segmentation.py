@@ -4,6 +4,7 @@ import numpy as np
 from typing import Tuple
 from numpy.typing import NDArray
 from numpy import float64
+import time
 
 
 class GroundSegmentation:
@@ -18,16 +19,20 @@ class GroundSegmentation:
         cloud.from_array(array_xyz)
         return cloud
 
-    def point_plane_distance(self, a, b, c, d, point) -> float:
+    def point_plane_distance(self, a, b, c, d, array: NDArray[float64]):
         """
         Calculate the distance between a point and a plane
         ax + by + cz + d = 0
         """
-        normal = np.array([a, b, c])
+        normal = np.tile(np.array([a, b, c]), (array.shape[0], 1))
+        d_array = np.tile(d, (array.shape[0], 1))
 
         # Calculate the distance using the formula
-        numerator = abs(np.dot(point, normal) + d)
-        denominator = np.linalg.norm(normal)
+        # numerator = np.abs(np.dot(pt, normal) + d_array)
+        dot_product = np.sum(array * normal, axis=1)
+        dot_product = dot_product[:, np.newaxis]  # make it a column vector
+        numerator = np.abs(dot_product + d_array)
+        denominator = np.linalg.norm(np.array([a, b, c]))
 
         distance = numerator / denominator
         return distance
@@ -74,20 +79,21 @@ class GroundSegmentation:
                         # keep point that are close to the plane
                         points = pBox.to_array()
                         print("plane found", len(indices))
-                        for point in points:
-                            dist = self.point_plane_distance(
-                                coefficients[0],
-                                coefficients[1],
-                                coefficients[2],
-                                coefficients[3],
-                                point,
-                            )
-                            if dist < self.max_distance_to_plane:
-                                X = np.append(X, [point], axis=0)
+                        dist = self.point_plane_distance(
+                            coefficients[0],
+                            coefficients[1],
+                            coefficients[2],
+                            coefficients[3],
+                            points,
+                        )
+                        idx = dist < self.max_distance_to_plane
+                        idx = idx.flatten()  # make it a row vector
+                        X = np.append(X, points[idx], axis=0)
 
         return X
 
     def generate_height_map(self) -> Tuple[pcl.PointCloud, pcl.PointCloud]:
+        start = time.time()
         cloud = pcl.PointCloud_PointNormal()
         cloud._from_pcd_file(self.cloud_filename.encode("utf-8"))
 
@@ -99,6 +105,7 @@ class GroundSegmentation:
 
         # get the terrain height
         ground_array = self.compute_ground_cloud(ground_cloud)
+        print("Segmenting ground, time elapsed: ", time.time() - start)
         ground_cloud = pcl.PointCloud()
         ground_cloud.from_list(ground_array)
 
@@ -118,5 +125,5 @@ class GroundSegmentation:
 
         forest_cloud = pcl.PointCloud()
         forest_cloud.from_array(forest_array)
-
+        print("Segmenting forest, time elapsed: ", time.time() - start)
         return ground_cloud, forest_cloud
