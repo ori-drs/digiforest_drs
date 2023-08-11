@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from digiforest_analysis import Pipeline
+from digiforest_analysis.pipeline import Pipeline
 from pathlib import Path
 
 import argparse
@@ -21,15 +21,14 @@ if __name__ == "__main__":
         raise ValueError(f"Input file [{filename}] does not exist")
 
     # Read cloud
-    cloud = o3d.io.read_point_cloud(filename)
-
+    cloud = o3d.io.read_point_cloud(str(filename))
     assert cloud.has_normals()
 
     # Configure pipeline
     pipeline = Pipeline()
 
     # Process cloud
-    report = pipeline.process(cloud)
+    report = pipeline.process(cloud=cloud)
 
     # Extract report
     print(report)

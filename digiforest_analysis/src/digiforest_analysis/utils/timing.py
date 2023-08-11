@@ -1,4 +1,9 @@
+#!/usr/bin/env python
 import time
+
+"""
+A simple Timer class with context manager support
+"""
 
 
 class Timer:

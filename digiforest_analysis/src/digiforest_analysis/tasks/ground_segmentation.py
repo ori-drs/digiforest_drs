@@ -1,31 +1,29 @@
+from digiforest_analysis.tasks import BaseTask
+
 import pcl
 import numpy as np
 from numpy.typing import NDArray
 from numpy import float64
 
 
-class GroundSegmentation:
-    def __init__(
-        self,
-        max_distance_to_plane: float = 0.5,
-        cell_size: float = 4.0,
-        normal_thr: float = 0.95,
-        box_size: float = 80,
-        *args,
-        **kwargs,
-    ):
+class GroundSegmentation(BaseTask):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
-        self._max_distance_to_plane = max_distance_to_plane
-        self._cell_size = cell_size
-        self._normal_thr = normal_thr
-        self._cloud_boxsize = box_size
-
+        self._max_distance_to_plane = kwargs.get("max_distance_to_plane", 0.5)
+        self._cell_size = kwargs.get("cell_size", 4.0)
+        self._normal_thr = kwargs.get("normal_thr", 0.95)
+        self._cloud_boxsize = kwargs.get("box_size", 80)
         self._debug = kwargs.get("debug", False)
 
-    def process(self, cloud: pcl.PointCloud_PointNormal):
-        """
+    def _process(self, **kwargs):
+        """ "
         Processes the cloud and outputs the ground and forest clouds
+
+        Returns:
+            _type_: _description_
         """
+        cloud = kwargs.get("cloud")
 
         # remove non-up points
         ground_cloud = self.filter_up_normal(cloud, self._normal_thr)
@@ -177,3 +175,35 @@ class GroundSegmentation:
                         X = np.append(X, points[idx], axis=0)
 
         return X
+
+
+if __name__ == "__main__":
+    """Minimal example"""
+    import pcl
+    import os
+    import sys
+
+    if len(sys.argv) != 3:
+        print("Usage : ./script input_cloud output_folder")
+    else:
+        filename, extension = os.path.splitext(sys.argv[1])
+
+        if extension != ".pcd":
+            sys.exit("Input file must be a pcd file")
+
+        print("Processing", sys.argv[1])
+
+        cloud = pcl.PointCloud_PointNormal()
+        cloud._from_pcd_file(sys.argv[1].encode("utf-8"))
+        app = GroundSegmentation(
+            max_distance_to_plane=0.5,
+            cell_size=4.0,
+            normal_thr=0.92,
+            box_size=80,
+        )
+        ground_cloud, forest_cloud = app.process(cloud=cloud)
+
+        ground_cloud_filename = os.path.join(sys.argv[2], "ground_cloud.pcd")
+        ground_cloud.to_file(str.encode(ground_cloud_filename))
+        forest_cloud_filename = os.path.join(sys.argv[2], "forest_cloud.pcd")
+        forest_cloud.to_file(str.encode(forest_cloud_filename))
