@@ -102,16 +102,20 @@ class GroundSegmentation:
         cloud.from_array(array_xyz)
         return cloud
 
-    def point_plane_distance(self, a, b, c, d, point) -> float:
+    def point_plane_distance(self, a, b, c, d, array: NDArray[float64]):
         """
         Calculate the distance between a point and a plane
         ax + by + cz + d = 0
         """
-        normal = np.array([a, b, c])
+        normal = np.tile(np.array([a, b, c]), (array.shape[0], 1))
+        d_array = np.tile(d, (array.shape[0], 1))
 
         # Calculate the distance using the formula
-        numerator = abs(np.dot(point, normal) + d)
-        denominator = np.linalg.norm(normal)
+        # numerator = np.abs(np.dot(pt, normal) + d_array)
+        dot_product = np.sum(array * normal, axis=1)
+        dot_product = dot_product[:, np.newaxis]  # make it a column vector
+        numerator = np.abs(dot_product + d_array)
+        denominator = np.linalg.norm(np.array([a, b, c]))
 
         distance = numerator / denominator
         return distance
@@ -161,15 +165,15 @@ class GroundSegmentation:
                         points = pBox.to_array()
                         if self._debug:
                             print("plane found", len(indices))
-                        for point in points:
-                            dist = self.point_plane_distance(
-                                coefficients[0],
-                                coefficients[1],
-                                coefficients[2],
-                                coefficients[3],
-                                point,
-                            )
-                            if dist < self._max_distance_to_plane:
-                                X = np.append(X, [point], axis=0)
+                        dist = self.point_plane_distance(
+                            coefficients[0],
+                            coefficients[1],
+                            coefficients[2],
+                            coefficients[3],
+                            points,
+                        )
+                        idx = dist < self.max_distance_to_plane
+                        idx = idx.flatten()  # make it a row vector
+                        X = np.append(X, points[idx], axis=0)
 
         return X
