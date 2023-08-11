@@ -8,7 +8,7 @@ import shutil
 import os
 
 
-def cropBox(cloud: pcl.PointCloud, midpoint, boxsize) -> pcl.PointCloud:
+def crop_box(cloud: pcl.PointCloud, midpoint, boxsize) -> pcl.PointCloud:
     clipper = cloud.make_cropbox()
     outcloud = pcl.PointCloud()
     tx = 0
@@ -32,13 +32,13 @@ def cropBox(cloud: pcl.PointCloud, midpoint, boxsize) -> pcl.PointCloud:
     return outcloud
 
 
-def filterUpNormal(
-    x: pcl.PointCloud_PointNormal, upthreshold: float, keepUp=True
+def filter_up_normal(
+    x: pcl.PointCloud_PointNormal, upthreshold: float, keep_up=True
 ) -> pcl.PointCloud_PointNormal:
     # filter out not-up points from PCLXYZNormal
     cloud_filtered = pcl.PointCloud_PointNormal()
     xy_dat = x.to_array()
-    if keepUp:
+    if keep_up:
         x_displayed = xy_dat[(xy_dat[:, 5] > upthreshold)]
     else:
         x_displayed = xy_dat[(xy_dat[:, 5] <= upthreshold)]
@@ -46,15 +46,15 @@ def filterUpNormal(
     return cloud_filtered
 
 
-def getMinimumHeight(pBox):
-    heights = pBox.to_array()[:, 2]
+def get_minimum_height(p_box):
+    heights = p_box.to_array()[:, 2]
     heights_a = np.array(heights)
     return np.min(heights_a)
 
 
-def getRobustHeight(pBox):
-    heights = pBox.to_array()[:, 2]
-    xmean = np.mean(pBox, 0)
+def get_robust_height(p_box):
+    heights = p_box.to_array()[:, 2]
+    xmean = np.mean(p_box, 0)
     mean_height = xmean[2]
 
     m = np.percentile(heights, 10, axis=0)
@@ -74,11 +74,11 @@ def getRobustHeight(pBox):
     return robust_height
 
 
-def getTerrainHeight(p: pcl.PointCloud) -> NDArray[float64]:
+def get_terrain_height(p: pcl.PointCloud) -> NDArray[float64]:
     # input is a PCLXYZ
     # output is an np.array of points [x,y,z]
 
-    # p = filterUpNormal(p)
+    # p = filter_up_normal(p)
     # print (p.size)
 
     # number of cells is (cloud_boxsize/cell_size) squared
@@ -101,13 +101,13 @@ def getTerrainHeight(p: pcl.PointCloud) -> NDArray[float64]:
     for xx in d_x:
         for yy in d_y:
             cell_midpoint = np.array([xx, yy, 0])
-            pBox = cropBox(p, cell_midpoint, cell_size)
-            # print (xx , " ", yy, " ", pBox.size)
-            if pBox.size < 100:
+            p_box = crop_box(p, cell_midpoint, cell_size)
+            # print (xx , " ", yy, " ", p_box.size)
+            if p_box.size < 100:
                 height = np.NAN  # 10.0
             else:
-                height = getMinimumHeight(pBox)
-                # height = getRobustHeight(pBox)
+                height = get_minimum_height(p_box)
+                # height = get_robust_height(p_box)
                 # xmean = np.mean(pout,0)
                 # height = xmean[2]
             X = np.append(X, [[xx, yy, height]], axis=0)
@@ -125,7 +125,7 @@ def generate_height_map(filename: str):
     cloud_pc._from_pcd_file(filename.encode("utf-8"))
 
     # remove non-up points
-    cloud = filterUpNormal(cloud_pc, 0.95)
+    cloud = filter_up_normal(cloud_pc, 0.95)
 
     # drop from xyznormal to xyz
     array_xyz = cloud.to_array()[:, 0:3]
@@ -133,7 +133,7 @@ def generate_height_map(filename: str):
     cloud.from_array(array_xyz)
 
     # get the terrain height
-    heights_array_raw = getTerrainHeight(cloud)
+    heights_array_raw = get_terrain_height(cloud)
     pcd = pcl.PointCloud()
     pcd.from_list(heights_array_raw)
     pcd.to_file(b"/tmp/height_map.pcd")
