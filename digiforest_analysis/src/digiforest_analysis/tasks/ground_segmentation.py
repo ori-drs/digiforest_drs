@@ -2,6 +2,7 @@ from digiforest_analysis.tasks import BaseTask
 
 import pcl
 import numpy as np
+import open3d as o3d
 from numpy.typing import NDArray
 from numpy import float64
 
@@ -17,7 +18,7 @@ class GroundSegmentation(BaseTask):
         self._debug = kwargs.get("debug", False)
 
     def _process(self, **kwargs):
-        """ "
+        """
         Processes the cloud and outputs the ground and forest clouds
 
         Returns:
@@ -28,7 +29,7 @@ class GroundSegmentation(BaseTask):
         # remove non-up points
         ground_cloud = self.filter_up_normal(cloud, self._normal_thr)
 
-        # drop from xyznormal to xyz
+        # # drop from xyznormal to xyz
         ground_cloud = self.remove_normals(ground_cloud)
 
         # get the terrain height
@@ -56,7 +57,7 @@ class GroundSegmentation(BaseTask):
         return ground_cloud, forest_cloud
 
     def crop_box(self, cloud: pcl.PointCloud, midpoint, boxsize) -> pcl.PointCloud:
-        clipper = cloud.make_cropbox()
+        clipper = pcl.PointCloud(cloud.to_array()[:, :3]).make_cropbox()
         outcloud = pcl.PointCloud()
         tx = 0
         ty = 0
@@ -118,16 +119,18 @@ class GroundSegmentation(BaseTask):
         distance = numerator / denominator
         return distance
 
-    def compute_ground_cloud(self, p: pcl.PointCloud) -> NDArray[float64]:
+    def compute_ground_cloud(self, cloud: pcl.PointCloud) -> NDArray[float64]:
         """
         filter the points of the input cloud and return the points that are
         on the ground
         output is an np.array of points [x,y,z]
         """
 
+        np_cloud = cloud.to_array()
+
         # number of cells is (self._cloud_boxsize/cell_size) squared
         cloud_midpoint_round = (
-            np.round(np.mean(p, 0) / self._cell_size) * self._cell_size
+            np.round(np.mean(np_cloud, 0) / self._cell_size) * self._cell_size
         )
 
         d_x = np.arange(
@@ -140,12 +143,12 @@ class GroundSegmentation(BaseTask):
             cloud_midpoint_round[1] + self._cloud_boxsize / 2,
             self._cell_size,
         )
-        X = np.empty(shape=[0, 3], dtype=np.float32)
+        X = np.empty(shape=np_cloud.shape, dtype=np.float32)
 
         for xx in d_x:
             for yy in d_y:
                 cell_midpoint = np.array([xx, yy, 0])
-                pBox = self.crop_box(p, cell_midpoint, self._cell_size)
+                pBox = self.crop_box(cloud, cell_midpoint, self._cell_size)
                 if pBox.size > 100:
                     # plane fitting
                     seg = pBox.make_segmenter_normals(ksearch=50)
@@ -177,12 +180,97 @@ class GroundSegmentation(BaseTask):
         return X
 
 
+class GroundSegmentationOpen3d(BaseTask):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+        self._max_distance_to_plane = kwargs.get("max_distance_to_plane", 0.5)
+        self._cell_size = kwargs.get("cell_size", 4.0)
+        self._normal_thr = kwargs.get("normal_thr", 0.95)
+        self._cloud_boxsize = kwargs.get("box_size", 80)
+        self._debug = kwargs.get("debug", False)
+
+    def _process(self, **kwargs):
+        """ "
+        Processes the cloud and outputs the ground and forest clouds
+
+        Returns:
+            _type_: _description_
+        """
+        cloud = kwargs.get("cloud")
+
+        # Filter by normal
+        mask = cloud.point.normals[:, 2] > self._normal_thr
+        ground_cloud = cloud.select_by_mask(mask)
+        forest_cloud = cloud.select_by_mask(mask, invert=True)
+
+        # Get the terain by plane fitting
+        ground_cloud = self.compute_ground_cloud(ground_cloud)
+
+        return ground_cloud, forest_cloud
+
+    def compute_ground_cloud(self, cloud):
+        """
+        filter the points of the input cloud by fitting planes on each cell of a fixed-size grid
+        """
+
+        # Create KD-tree
+        cloud_copy = o3d.geometry.PointCloud(cloud.to_legacy())
+        kd_tree = o3d.geometry.KDTreeFlann(cloud_copy)
+
+        # number of cells is (self._cloud_boxsize/cell_size) squared
+        mid_point = cloud.point.positions.mean(dim=0)
+
+        d_x = np.arange(
+            mid_point[0].item() - self._cloud_boxsize / 2,
+            mid_point[0].item() + self._cloud_boxsize / 2,
+            self._cell_size,
+        )
+        d_y = np.arange(
+            mid_point[1].item() - self._cloud_boxsize / 2,
+            mid_point[1].item() + self._cloud_boxsize / 2,
+            self._cell_size,
+        )
+
+        cloud_inliers = []
+        for xx in d_x:
+            for yy in d_y:
+                cell_midpoint = np.array([xx, yy, 0]).reshape((3, 1))
+                sub_cloud_indices = kd_tree.search_radius_vector_3d(
+                    query=cell_midpoint, radius=self._cell_size
+                )
+
+                # Extract indices from kd-tree output
+                indices = np.asarray(sub_cloud_indices[1], dtype=np.int64)
+
+                # Check if there are enough points
+                if sub_cloud_indices[0] > 100:
+                    # Mask the cloud
+                    sub_cloud = cloud.select_by_index(indices=indices)
+
+                    # Run plane fitting
+                    plane_model, inliers = sub_cloud.to_legacy().segment_plane(
+                        distance_threshold=self._max_distance_to_plane,
+                        ransac_n=3,
+                        num_iterations=1000,
+                    )
+                    [a, b, c, d] = plane_model
+
+                    if len(inliers) > 20:
+                        # This is ugly and requires to flatten the vector afterwards
+                        cloud_inliers.extend(indices[inliers])
+
+        cloud_inliers = np.asarray(cloud_inliers, dtype=np.int64).flatten()
+        return cloud.select_by_index(cloud_inliers)
+
+
 if __name__ == "__main__":
     """Minimal example"""
     import pcl
     import os
     import sys
 
+    print("PCL implementation")
     if len(sys.argv) != 3:
         print("Usage : ./script input_cloud output_folder")
     else:
@@ -203,7 +291,24 @@ if __name__ == "__main__":
         )
         ground_cloud, forest_cloud = app.process(cloud=cloud)
 
-        ground_cloud_filename = os.path.join(sys.argv[2], "ground_cloud.pcd")
+        ground_cloud_filename = os.path.join(sys.argv[2], "pcl_ground_cloud.pcd")
         ground_cloud.to_file(str.encode(ground_cloud_filename))
-        forest_cloud_filename = os.path.join(sys.argv[2], "forest_cloud.pcd")
+        forest_cloud_filename = os.path.join(sys.argv[2], "pcl_forest_cloud.pcd")
         forest_cloud.to_file(str.encode(forest_cloud_filename))
+
+    print("Open3D implementation")
+    cloud = o3d.t.io.read_point_cloud(sys.argv[1])
+    assert len(cloud.point.normals) > 0
+
+    app = GroundSegmentationOpen3d(
+        max_distance_to_plane=0.5,
+        cell_size=4.0,
+        normal_thr=0.92,
+        box_size=80,
+    )
+    ground_cloud, forest_cloud = app.process(cloud=cloud)
+
+    ground_cloud_filename = os.path.join(sys.argv[2], "o3d_ground_cloud.pcd")
+    o3d.io.write_point_cloud(ground_cloud_filename, ground_cloud.to_legacy())
+    forest_cloud_filename = os.path.join(sys.argv[2], "o3d_forest_cloud.pcd")
+    o3d.io.write_point_cloud(forest_cloud_filename, forest_cloud.to_legacy())

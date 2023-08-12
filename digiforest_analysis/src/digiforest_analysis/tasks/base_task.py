@@ -16,3 +16,7 @@ class BaseTask:
             output = self._process(**kwargs)
         print(self._timer)
         return output
+
+    @property
+    def timer(self):
+        return self._timer
