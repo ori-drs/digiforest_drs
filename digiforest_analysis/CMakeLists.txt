@@ -21,7 +21,9 @@ catkin_package(
 ## Python #
 ###########
 catkin_python_setup()
-catkin_install_python(PROGRAMS scripts/generate_height_maps.py         
+catkin_install_python(PROGRAMS scripts/experimental/generate_height_maps.py
+                               scripts/experimental/segment_ground.py
+                               scripts/offline_pipeline.py          
                       DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
 
 ###########
