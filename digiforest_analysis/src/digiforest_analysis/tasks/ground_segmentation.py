@@ -269,6 +269,7 @@ if __name__ == "__main__":
     import pcl
     import os
     import sys
+    from digiforest_analysis.utils import pcd
 
     print("PCL implementation")
     if len(sys.argv) != 3:
@@ -279,8 +280,10 @@ if __name__ == "__main__":
         if extension != ".pcd":
             sys.exit("Input file must be a pcd file")
 
-        print("Processing", sys.argv[1])
+        # Read header
+        header = pcd.load_header(sys.argv[1], binary=True)
 
+        # PCL implementation
         cloud = pcl.PointCloud_PointNormal()
         cloud._from_pcd_file(sys.argv[1].encode("utf-8"))
         app = GroundSegmentation(
@@ -293,6 +296,10 @@ if __name__ == "__main__":
 
         ground_cloud_filename = os.path.join(sys.argv[2], "pcl_ground_cloud.pcd")
         ground_cloud.to_file(str.encode(ground_cloud_filename))
+        ground_header = pcd.load_header(sys.argv[1], binary=True)
+        ground_header["VIEWPOINT"] = header["VIEWPOINT"]
+        pcd.replace_file_header(ground_cloud_filename, ground_header, binary=True)
+
         forest_cloud_filename = os.path.join(sys.argv[2], "pcl_forest_cloud.pcd")
         forest_cloud.to_file(str.encode(forest_cloud_filename))
 
@@ -300,6 +307,7 @@ if __name__ == "__main__":
     cloud = o3d.t.io.read_point_cloud(sys.argv[1])
     assert len(cloud.point.normals) > 0
 
+    # Open3D implementation
     app = GroundSegmentationOpen3d(
         max_distance_to_plane=0.5,
         cell_size=4.0,
