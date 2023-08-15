@@ -29,19 +29,13 @@ class Pipeline:
         )
 
         # Extract the trees from the forest cloud
-        self._tree_clouds, self._tree_attributes = self._tree_segmentation.process(
-            cloud=self._forest
-        )
+        self._trees = self._tree_segmentation.process(cloud=self._forest)
 
         # Get the specific attributes of each tree
-        self._tree_attributes = self._tree_analysis.process(
-            tree_clouds=self._tree_clouds, tree_attributes=self._tree_attributes
-        )
+        self._trees = self._tree_analysis.process(trees=self._trees)
 
         # Get general attributes from the full forest
-        self._forest_attributes = self._forest_analysis.process(
-            tree_attributes=self._tree_attributes
-        )
+        self._forest_attributes = self._forest_analysis.process(trees=self._trees)
 
         return report
 
@@ -54,12 +48,8 @@ class Pipeline:
         return self._forest
 
     @property
-    def tree_clouds(self):
-        return self._tree_clouds
-
-    @property
-    def tree_attributes(self):
-        return self._tree_attributes
+    def trees(self):
+        return self._trees
 
     @property
     def forest_attributes(self):
