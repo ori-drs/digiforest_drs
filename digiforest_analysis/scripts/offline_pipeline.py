@@ -24,8 +24,6 @@ if __name__ == "__main__":
     if not filename.exists():
         raise ValueError(f"Input file [{filename}] does not exist")
 
-    out_folder = args.out if args.out is not None else "/tmp"
-
     # Read cloud
     cloud = o3d.t.io.read_point_cloud(str(filename))
     header = pcd.load_header(str(filename))
@@ -52,15 +50,15 @@ if __name__ == "__main__":
 
     # Save ground
     ground = pipeline.ground
-    pcd.write_open3d(ground, header_fix, os.path.join(out_folder, "ground_cloud.pcd"))
+    pcd.write_open3d(ground, header_fix, os.path.join(out_dir, "ground_cloud.pcd"))
 
     # Save forest cloud
     forest = pipeline.forest
-    pcd.write_open3d(forest, header_fix, os.path.join(out_folder, "forest_cloud.pcd"))
+    pcd.write_open3d(forest, header_fix, os.path.join(out_dir, "forest_cloud.pcd"))
 
     # Get trees
     trees = pipeline.trees
     for t in trees:
         pcd.write_open3d(
-            t["cloud"], header_fix, os.path.join(out_folder, f"tree_{t['id']}.pcd")
+            t["cloud"], header_fix, os.path.join(out_dir, f"tree_{t['id']}.pcd")
         )
