@@ -1,7 +1,38 @@
-def load_header(file, binary=True):
+import fileinput
+import open3d as o3d
+import sys
+
+
+def write_pcl(cloud, header, filename):
+    # Write cloud to file
+    cloud.to_file(str.encode(filename), ascii=False)
+
+    # Update header
+    original_header = load_header(filename, binary=True)
+    for k, v in header.items():
+        original_header[k] = v
+
+    # Update file with header
+    replace_file_header(filename, original_header, binary=True)
+
+
+def write_open3d(cloud, header, filename):
+    # Write cloud to file
+    o3d.io.write_point_cloud(filename, cloud.to_legacy())
+
+    # Update header
+    original_header = load_header(filename, binary=True)
+    for k, v in header.items():
+        original_header[k] = v
+
+    # Update file with header
+    replace_file_header(filename, original_header, binary=True)
+
+
+def load_header(filename, binary=True):
     header = {}
     open_mode = "rb" if binary else "r"
-    with open(file, open_mode) as f:
+    with open(filename, open_mode) as f:
         while True:
             line = f.readline().decode()
 
@@ -34,47 +65,51 @@ def load_header(file, binary=True):
     return header
 
 
-def replace_file_header(file, header, binary=True):
-    open_mode = "wb+" if binary else "w+"
-    with open(file, open_mode) as f:
-        while True:
-            line = f.readline().decode()
+def replace_file_header(filename, header, binary=True):
+    if binary:
+        replace_file_header_binary(filename, header)
+    else:
+        replace_file_header_normal(filename, header)
 
-            if line.startswith("#"):
-                continue
-            if line.startswith("VERSION"):
-                key, value = line.split()
-                header[key] = value
+
+def replace_file_header_normal(filename, header):
+    pass
+
+
+def replace_file_header_binary(filename, header):
+    encoding = "utf-8"
+    with fileinput.FileInput(filename, inplace=True, mode="rb") as f:
+        for line in f:
+            # Parse file
+            if line.startswith(b"#"):
+                pass
+            if line.startswith(b"VERSION"):
+                key, value = line.decode().split()
+                # line.replace(line, (f"{key} {header[key]}\n").encode(encoding))
+                line = (f"{key} {header[key]}\n").encode(encoding)
             elif (
-                line.startswith("FIELDS")
-                or line.startswith("SIZE")
-                or line.startswith("TYPE")
-                or line.startswith("COUNT")
-                or line.startswith("VIEWPOINT")
+                line.startswith(b"FIELDS")
+                or line.startswith(b"SIZE")
+                or line.startswith(b"TYPE")
+                or line.startswith(b"COUNT")
+                or line.startswith(b"VIEWPOINT")
             ):
-                parts = line.split()
+                parts = line.decode().split()
                 key = parts[0]
-                values = parts[1:]
-                header[key] = values
+                # line.replace(line, (f"{key} " + " ".join(header[key]) + "\n").encode(encoding))
+                line = (f"{key} " + " ".join(header[key]) + "\n").encode(encoding)
             elif (
-                line.startswith("WIDTH")
-                or line.startswith("HEIGHT")
-                or line.startswith("POINTS")
+                line.startswith(b"WIDTH")
+                or line.startswith(b"HEIGHT")
+                or line.startswith(b"POINTS")
             ):
-                key, value = line.split()
-                header[key] = int(value)
-            elif line.startswith("DATA"):
-                # We ignore the data fields
-                break
+                key, value = line.decode().split()
+                # line.replace(line, (f"{key} {header[key]}\n").encode(encoding))
+                line = (f"{key} {header[key]}\n").encode(encoding)
+            elif line.startswith(b"DATA"):
+                pass
+            else:
+                pass
 
-        file_content = f.read()
-
-        for key, value in header.items():
-            header_entry = key
-            if isinstance(value, str):
-                header_entry += f" {value}"
-            elif isinstance(value, list):
-                for v in value:
-                    header_entry += f" {v}"
-            header_entry = header_entry.encode()
-            file_content.replace(header_entry)
+            # Write to standard output
+            sys.stdout.write(line)
