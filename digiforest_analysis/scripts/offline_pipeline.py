@@ -56,7 +56,7 @@ if __name__ == "__main__":
 
     # Save forest cloud
     forest = pipeline.forest
-    pcd.write_open3d(forest, header_fix, os.path.join(out_folder, "ground_cloud.pcd"))
+    pcd.write_open3d(forest, header_fix, os.path.join(out_folder, "forest_cloud.pcd"))
 
     # Get trees
     trees = pipeline.trees
