@@ -12,6 +12,11 @@ class TreeSegmentation(BaseTask):
         self._cluster_tolerance = kwargs.get("cluster_tolerance", 0.10)
         self._min_cluster_size = kwargs.get("min_cluster_size", 100)
         self._max_cluster_size = kwargs.get("max_cluster_size", 10000)
+        self._min_tree_height = kwargs.get("min_tree_height", 2.0)
+        self._max_tree_diameter = kwargs.get("max_tree_diameter", 2.0)
+        self._min_gravity_alignment_score = kwargs.get(
+            "min_gravity_alignment_score", 0.7
+        )
         self._debug = kwargs.get("debug", False)
 
     def _process(self, **kwargs):
@@ -25,10 +30,14 @@ class TreeSegmentation(BaseTask):
 
         # extract clusters
         clusters = self.extract_clusters(cloud)
-        print("Extracted " + str(len(clusters)) + " clusters")
+        if self._debug:
+            print("Extracted " + str(len(clusters)) + " initial clusters.")
 
         # filter out implausible clusters
         tree_clouds = self.filter_tree_clusters(clusters)
+        if self._debug:
+            num_filtered_clusters = len(clusters) - len(tree_clouds)
+            print("Filtered out " + str(num_filtered_clusters) + " clusters.")
         return tree_clouds
 
     def extract_clusters(self, cloud):
@@ -69,23 +78,71 @@ class TreeSegmentation(BaseTask):
         tree_clouds = []
         for cluster in clusters:
             isInvalidCluster = (
-                not self.isClusterAlignmentStraightEnough(cluster)
-                or self.isClusterTooLow(cluster)
-                or self.isClusterRadiusTooBig(cluster)
+                (not self.is_cluster_alignment_straight_enough(cluster))
+                or self.is_cluster_too_low(cluster)
+                or self.is_cluster_radius_too_big(cluster)
             )
 
-            if not isInvalidCluster:
+            if isInvalidCluster:
+                continue
+            else:
                 tree_clouds.append(cluster)
         return tree_clouds
 
-    def isClusterTooLow(self, cluster):
+    def is_cluster_too_low(self, cluster):
+        cluster_dim = self.get_cluster_dimensions(cluster)
+        if cluster_dim["dim_z"] < self._min_tree_height:
+            return True
         return False
 
-    def isClusterRadiusTooBig(self, cluster):
+    def is_cluster_radius_too_big(self, cluster):
+        cluster_dim = self.get_cluster_dimensions(cluster)
+        if (
+            cluster_dim["dim_x"] > self._max_tree_diameter
+            or cluster_dim["dim_y"] > self._max_tree_diameter
+        ):
+            return True
         return False
 
-    def isClusterAlignmentStraightEnough(self, cluster):
+    def is_cluster_alignment_straight_enough(self, cluster):
+        cluster_pca = self.compute_pca(cluster)
+        cluster_principal_axis = cluster_pca[:, 0]
+        gravity_axis = np.array([0, 0, 1])
+        alignment_score = np.abs(np.dot(cluster_principal_axis, gravity_axis))
+        if alignment_score < self._min_gravity_alignment_score:
+            return False
         return True
+
+    def get_cluster_dimensions(self, cluster):
+        cluster_np = cluster.to_array()
+        cluster_np_dim = np.max(cluster_np, axis=0) - np.min(cluster_np, axis=0)
+        cluster_dim = {
+            "dim_x": cluster_np_dim[0],
+            "dim_y": cluster_np_dim[1],
+            "dim_z": cluster_np_dim[2],
+        }
+        return cluster_dim
+
+    def compute_pca(self, cluster):
+        cluster_np = cluster.to_array()
+        # Center the data by subtracting the mean
+        mean = np.mean(cluster_np, axis=0)
+        centered_data = cluster_np - mean
+
+        # Calculate the covariance matrix
+        covariance_matrix = np.cov(centered_data, rowvar=False)
+
+        # Calculate eigenvectors and eigenvalues
+        eigenvalues, eigenvectors = np.linalg.eig(covariance_matrix)
+
+        # Sort eigenvectors by eigenvalues
+        sorted_indices = np.argsort(eigenvalues)[::-1]
+        sorted_eigenvectors = eigenvectors[:, sorted_indices]
+
+        # Choose the number of principal components (eigenvectors) you want to keep
+        num_components = 3
+        principal_components = sorted_eigenvectors[:, :num_components]
+        return principal_components
 
 
 if __name__ == "__main__":
@@ -108,11 +165,17 @@ if __name__ == "__main__":
         cloud._from_pcd_file(sys.argv[1].encode("utf-8"))
         app = TreeSegmentation(
             voxel_size=0.05,
-            cluster_tolerance=0.10,
+            cluster_tolerance=1.0,
             min_cluster_size=100,
             max_cluster_size=25000,
+            min_tree_height=1.0,
+            max_tree_diameter=2.0,
+            min_gravity_alignment_score=0.0,
+            debug=True,
         )
         tree_clouds = app.process(cloud=cloud)
+
+        print("Found " + str(len(tree_clouds)) + " trees")
 
         # Write output clusters to disk
         for j, tree_cloud in enumerate(tree_clouds):
