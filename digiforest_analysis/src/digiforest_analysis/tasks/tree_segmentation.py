@@ -17,6 +17,7 @@ class TreeSegmentation(BaseTask):
         self._min_gravity_alignment_score = kwargs.get(
             "min_gravity_alignment_score", 0.7
         )
+        self._max_trunk_height = kwargs.get("max_trunk_height", 5.0)
         self._debug = kwargs.get("debug", False)
 
     def _process(self, **kwargs):
@@ -51,10 +52,10 @@ class TreeSegmentation(BaseTask):
         vg.set_leaf_size(self._voxel_size, self._voxel_size, self._voxel_size)
         cloud_ds = vg.filter()
 
-        # Creating the kdtree object for the searching
+        # creating the kdtree object for the searching
         tree = cloud_ds.make_kdtree()
-        # tree = cloud_ds.make_kdtree_flann()
 
+        # perform Euclidean Clustering
         ec = cloud_ds.make_EuclideanClusterExtraction()
         ec.set_ClusterTolerance(self._cluster_tolerance)
         ec.set_MinClusterSize(self._min_cluster_size)
@@ -121,11 +122,13 @@ class TreeSegmentation(BaseTask):
     def get_cluster_dimensions(self, cluster):
         cluster_np = cluster.to_array()
         cluster_np_dim = np.max(cluster_np, axis=0) - np.min(cluster_np, axis=0)
+        cluster_min_z = float(np.min(cluster_np, axis=0)[2])
         cluster_np_dim = cluster_np_dim.tolist()
         cluster_dim = {
             "dim_x": cluster_np_dim[0],
             "dim_y": cluster_np_dim[1],
             "dim_z": cluster_np_dim[2],
+            "min_z": cluster_min_z,
         }
         return cluster_dim
 
@@ -150,6 +153,50 @@ class TreeSegmentation(BaseTask):
         principal_components = sorted_eigenvectors[:, :num_components]
         return principal_components
 
+    def compute_dbh(self, cloud):
+        # passthrough filter to get the trunk points
+        cluster_dim = self.get_cluster_dimensions(cloud)
+        passthrough = cloud.make_passthrough_filter()
+        passthrough.set_filter_field_name("z")
+        passthrough.set_filter_limits(
+            cluster_dim["min_z"], cluster_dim["min_z"] + self._max_trunk_height
+        )
+        cloud_filtered = passthrough.filter()
+        if self._debug:
+            print(
+                "DBH: Passthrough filter let "
+                + str(cloud_filtered.size)
+                + " of "
+                + str(cloud.size)
+                + "points."
+            )
+        # cloud_filtered = cloud
+        if cloud_filtered.size < 10:
+            dbh = 0
+            if self._debug:
+                print("DBH Insufficient points for fitting a cylinder")
+            return dbh
+
+        # compute cloud normals
+        ne = cloud_filtered.make_NormalEstimation()
+        tree = cloud_filtered.make_kdtree()
+        ne.set_SearchMethod(tree)
+        ne.set_KSearch(20)
+
+        # fit cylinder
+        seg = cloud_filtered.make_segmenter_normals(ksearch=20)
+        seg.set_optimize_coefficients(True)
+        seg.set_model_type(pcl.SACMODEL_CYLINDER)
+        seg.set_normal_distance_weight(0.1)
+        seg.set_method_type(pcl.SAC_RANSAC)
+        seg.set_max_iterations(1000)
+        seg.set_distance_threshold(0.10)
+        seg.set_radius_limits(0, 0.5 * self._max_tree_diameter)
+        [inliers_cylinder, coefficients_cylinder] = seg.segment()
+        radius_cylinder = coefficients_cylinder[6]
+        dbh = 2 * radius_cylinder
+        return dbh
+
     def compute_cluster_info(self, cluster):
         # compute cluster mean
         cluster_np = cluster.to_array()
@@ -158,7 +205,7 @@ class TreeSegmentation(BaseTask):
         # compute cluster dimensions
         cluster_dim = self.get_cluster_dimensions(cluster)
         # compute DBH
-        dbh = 2.50
+        dbh = self.compute_dbh(cluster)
 
         cluster_info = {
             "mean": cluster_mean,
@@ -193,7 +240,8 @@ if __name__ == "__main__":
             min_cluster_size=100,
             max_cluster_size=25000,
             min_tree_height=1.0,
-            max_tree_diameter=2.0,
+            max_trunk_height=5.0,
+            max_tree_diameter=2.5,
             min_gravity_alignment_score=0.0,
             debug=True,
         )
