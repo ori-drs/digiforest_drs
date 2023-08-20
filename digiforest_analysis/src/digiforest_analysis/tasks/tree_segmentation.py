@@ -35,10 +35,15 @@ class TreeSegmentation(BaseTask):
 
         # filter out implausible clusters
         tree_clouds = self.filter_tree_clusters(clusters)
+        trees_info = []
+        for tree in tree_clouds:
+            cluster_info = self.compute_cluster_info(tree)
+            trees_info.append(cluster_info)
+
         if self._debug:
             num_filtered_clusters = len(clusters) - len(tree_clouds)
             print("Filtered out " + str(num_filtered_clusters) + " clusters.")
-        return tree_clouds
+        return tree_clouds, trees_info
 
     def extract_clusters(self, cloud):
         # downsample the input cloud
@@ -116,6 +121,7 @@ class TreeSegmentation(BaseTask):
     def get_cluster_dimensions(self, cluster):
         cluster_np = cluster.to_array()
         cluster_np_dim = np.max(cluster_np, axis=0) - np.min(cluster_np, axis=0)
+        cluster_np_dim = cluster_np_dim.tolist()
         cluster_dim = {
             "dim_x": cluster_np_dim[0],
             "dim_y": cluster_np_dim[1],
@@ -144,11 +150,29 @@ class TreeSegmentation(BaseTask):
         principal_components = sorted_eigenvectors[:, :num_components]
         return principal_components
 
+    def compute_cluster_info(self, cluster):
+        # compute cluster mean
+        cluster_np = cluster.to_array()
+        cluster_mean = np.mean(cluster_np, axis=0)
+        cluster_mean = cluster_mean.tolist()
+        # compute cluster dimensions
+        cluster_dim = self.get_cluster_dimensions(cluster)
+        # compute DBH
+        dbh = 2.50
+
+        cluster_info = {
+            "mean": cluster_mean,
+            "dim": cluster_dim,
+            "dbh": dbh,
+        }
+        return cluster_info
+
 
 if __name__ == "__main__":
     """Minimal example"""
     import os
     import sys
+    import json
 
     print("Tree segmentation")
     if len(sys.argv) != 3:
@@ -173,7 +197,7 @@ if __name__ == "__main__":
             min_gravity_alignment_score=0.0,
             debug=True,
         )
-        tree_clouds = app.process(cloud=cloud)
+        tree_clouds, trees_info = app.process(cloud=cloud)
 
         print("Found " + str(len(tree_clouds)) + " trees")
 
@@ -182,3 +206,11 @@ if __name__ == "__main__":
             tree_name = "tree_cloud_" + str(j) + ".pcd"
             tree_cloud_filename = os.path.join(sys.argv[2], tree_name)
             tree_cloud.to_file(str.encode(tree_cloud_filename))
+
+        # write tree info
+        data = {"name": "John", "age": 30, "city": "New York"}
+        for j, tree_info in enumerate(trees_info):
+            tree_name = "tree_info_" + str(j) + ".json"
+            tree_info_filename = os.path.join(sys.argv[2], tree_name)
+            with open(tree_info_filename, "w") as json_file:
+                json.dump(tree_info, json_file, indent=4)
