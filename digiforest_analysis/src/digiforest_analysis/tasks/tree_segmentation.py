@@ -220,6 +220,7 @@ if __name__ == "__main__":
     import os
     import sys
     import json
+    import matplotlib.pyplot as plt
 
     print("Tree segmentation")
     if len(sys.argv) != 3:
@@ -248,6 +249,29 @@ if __name__ == "__main__":
         tree_clouds, trees_info = app.process(cloud=cloud)
 
         print("Found " + str(len(tree_clouds)) + " trees")
+
+        # Plot tree locations and DBH as scatter plot
+        trees_loc_x = []
+        trees_loc_y = []
+        trees_dbh = []
+        for tree_info in trees_info:
+            trees_loc_x.append(tree_info["mean"][0])
+            trees_loc_y.append(tree_info["mean"][1])
+            trees_dbh.append(tree_info["dbh"])
+        trees_area = [10**3 * 3.14 * (dbh / 2) ** 2 for dbh in trees_dbh]
+
+        plt.scatter(
+            trees_loc_x, trees_loc_y, s=trees_area, color="blue", marker="o", alpha=0.5
+        )
+        # Add index labels to each point
+        for i, (xi, yi) in enumerate(zip(trees_loc_x, trees_loc_y)):
+            plt.text(xi + 0.1, yi + 0.1, str(i), fontsize=10, ha="center", va="bottom")
+        plt.xlabel("X-axis")
+        plt.ylabel("Y-axis")
+        plt.title("Tree Locations")
+        plt.legend()
+        plt.grid(True)
+        plt.show()
 
         # Write output clusters to disk
         for j, tree_cloud in enumerate(tree_clouds):
