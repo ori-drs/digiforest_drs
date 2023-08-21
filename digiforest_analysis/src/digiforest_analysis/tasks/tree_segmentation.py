@@ -28,6 +28,7 @@ class TreeSegmentation(BaseTask):
             _type_: _description_
         """
         cloud = kwargs.get("cloud")
+        assert len(cloud.point.normals) > 0
 
         # extract clusters
         clusters = self.extract_clusters(cloud)

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 from digiforest_analysis.pipeline import Pipeline
+from digiforest_analysis.utils import pcd
 from pathlib import Path
 
 import argparse
 import open3d as o3d
+
+import os
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -21,8 +25,9 @@ if __name__ == "__main__":
         raise ValueError(f"Input file [{filename}] does not exist")
 
     # Read cloud
-    cloud = o3d.io.read_point_cloud(str(filename))
-    assert cloud.has_normals()
+    cloud = o3d.t.io.read_point_cloud(str(filename))
+    header = pcd.load_header(str(filename))
+    assert len(cloud.point.normals) > 0
 
     # Configure pipeline
     pipeline = Pipeline()
@@ -40,14 +45,20 @@ if __name__ == "__main__":
         out_dir = filename.parent
     out_dir.mkdir(exist_ok=True)
 
+    # Prepare header fix
+    header_fix = {"VIEWPOINT": header["VIEWPOINT"]}
+
     # Save ground
     ground = pipeline.ground
+    pcd.write_open3d(ground, header_fix, os.path.join(out_dir, "ground_cloud.pcd"))
 
     # Save forest cloud
     forest = pipeline.forest
+    pcd.write_open3d(forest, header_fix, os.path.join(out_dir, "forest_cloud.pcd"))
 
     # Get trees
-    trees_cloud = pipeline.tree_clouds
-
-    # Get tree attributes
-    trees_att = pipeline._tree_attributes
+    trees = pipeline.trees
+    for t in trees:
+        pcd.write_open3d(
+            t["cloud"], header_fix, os.path.join(out_dir, f"tree_{t['id']}.pcd")
+        )

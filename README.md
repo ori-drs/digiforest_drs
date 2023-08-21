@@ -10,9 +10,7 @@ Authors: Benoit Casseau, Matias Mattamala, Nived Chebrolu, Maurice Fallon
 - `digiforest_analysis_ros`: ROS wrappers
 - `digiforest_slam_logger`: Tool to export a state estimate solution in the SLAM format
 
-## Development
-
-### Setup
+## Setup
 
 Use a virtual environment (`env` in the example), isolated from the system dependencies:
 
@@ -38,4 +36,29 @@ Install the automatic formatting pre-commit hooks (black and flake8), which will
 
 ```sh
 pre-commit install
+```
+
+Install `digiforest_analysis`:
+
+```sh
+cd ~/git/digiforest_drs/digiforest_analysis
+pip install -e .
+```
+
+## Execution
+
+To run the offline pipeline:
+
+```sh
+cd ~/git/digiforest_drs/digiforest_analysis
+python scripts/offline_pipeline.py <input_pcd_file> --out <output_directory>
+```
+
+This will export a series of PCD files:
+
+```sh
+ground_cloud.pcd
+forest_cloud.pcd
+tree_<ID>.pcd
+...
 ```
