@@ -3,6 +3,16 @@ import open3d as o3d
 import sys
 
 
+def load(filename: str, binary=True):
+    cloud = o3d.t.io.read_point_cloud(filename)
+    header = load_header(filename, binary=binary)
+    return cloud, header
+
+
+def write(cloud, header, filename):
+    write_open3d(cloud, header, filename)
+
+
 def write_pcl(cloud, header, filename):
     # Write cloud to file
     cloud.to_file(str.encode(filename), ascii=False)

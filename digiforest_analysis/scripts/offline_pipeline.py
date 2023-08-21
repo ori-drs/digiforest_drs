@@ -4,8 +4,6 @@ from digiforest_analysis.utils import pcd
 from pathlib import Path
 
 import argparse
-import open3d as o3d
-
 import os
 
 
@@ -25,8 +23,7 @@ if __name__ == "__main__":
         raise ValueError(f"Input file [{filename}] does not exist")
 
     # Read cloud
-    cloud = o3d.t.io.read_point_cloud(str(filename))
-    header = pcd.load_header(str(filename))
+    cloud, header = pcd.load(str(filename), binary=True)
     assert len(cloud.point.normals) > 0
 
     # Configure pipeline
@@ -36,7 +33,7 @@ if __name__ == "__main__":
     report = pipeline.process(cloud=cloud)
 
     # Extract report
-    print(report)
+    print(f"\nPipeline report: \n{report}")
 
     # Prepare output folders
     if args.out is not None:
@@ -50,11 +47,11 @@ if __name__ == "__main__":
 
     # Save ground
     ground = pipeline.ground
-    pcd.write_open3d(ground, header_fix, os.path.join(out_dir, "ground_cloud.pcd"))
+    pcd.write(ground, header_fix, os.path.join(out_dir, "ground_cloud.pcd"))
 
     # Save forest cloud
     forest = pipeline.forest
-    pcd.write_open3d(forest, header_fix, os.path.join(out_dir, "forest_cloud.pcd"))
+    pcd.write(forest, header_fix, os.path.join(out_dir, "forest_cloud.pcd"))
 
     # Get trees
     trees = pipeline.trees
