@@ -8,7 +8,10 @@ class TreeSegmentation(BaseTask):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
+        self._normal_thr = kwargs.get("normal_thr", 0.5)
         self._voxel_size = kwargs.get("voxel_size", 0.05)
+        self._clustering_method = kwargs.get("clustering_method", "dbscan_sk")
+
         self._cluster_tolerance = kwargs.get("cluster_tolerance", 0.10)
         self._min_cluster_size = kwargs.get("min_cluster_size", 100)
         self._max_cluster_size = kwargs.get("max_cluster_size", 10000)
@@ -30,12 +33,15 @@ class TreeSegmentation(BaseTask):
         cloud = kwargs.get("cloud")
         assert len(cloud.point.normals) > 0
 
-        # extract clusters
-        clusters = self.euclidean_clustering(cloud)
+        # Prefiltering
+        cloud = self.prefiltering(cloud)
+
+        # Extract clusters
+        clusters = self.coarse_clustering(cloud, self._clustering_method)
         if self._debug:
             print("Extracted " + str(len(clusters)) + " initial clusters.")
 
-        # filter out implausible clusters
+        # Filter out implausible clusters
         tree_clouds = self.filter_tree_clusters(clusters)
         trees_info = []
         for tree in tree_clouds:
@@ -47,83 +53,66 @@ class TreeSegmentation(BaseTask):
             print("Filtered out " + str(num_filtered_clusters) + " clusters.")
         return tree_clouds, trees_info
 
-    def euclidean_clustering(self, cloud):
-
-        # Create KD-tree
-        cloud_copy = o3d.geometry.PointCloud(cloud.to_legacy())
-        kd_tree = o3d.geometry.KDTreeFlann(cloud_copy)
-
-        voxel_grid = o3d.geometry.VoxelGrid.create_from_point_cloud(
-            cloud_copy, voxel_size=0.05
+    def prefiltering(self, cloud, **kwargs):
+        # Filter by Z-normals
+        mask = (cloud.point.normals[:, 2] >= -self._normal_thr) & (
+            cloud.point.normals[:, 2] <= self._normal_thr
         )
-        print(voxel_grid)
+        new_cloud = o3d.t.geometry.PointCloud(cloud.select_by_mask(mask))
 
-        clusters_c = []
-        queue_c = []
+        # Downsample
+        new_cloud = new_cloud.voxel_down_sample(voxel_size=self._voxel_size)
 
-        for i in range(np.asarray(cloud_copy.points).shape[0]):
-            queue_c.append(i)
-            for j in queue_c:
-                sub_cloud_indices = kd_tree.search_hybrid_vector_3d(
-                    query=cloud_copy.points[j],
-                    radius=self._cluster_tolerance,
-                    max_nn=20,
+        return new_cloud
+
+    def coarse_clustering(self, cloud, method="dbscan_o3d"):
+        if method == "dbscan_o3d":
+            eps = 0.8
+            min_cluster_size = 20
+            labels = np.array(
+                cloud.cluster_dbscan(
+                    eps=eps, min_points=min_cluster_size, print_progress=False
                 )
-                indices = np.asarray(sub_cloud_indices[1], dtype=np.int64)
+            )
+        elif method == "dbscan_sk":
+            from sklearn.cluster import DBSCAN
 
-                queue_candidates = [k for k in indices if k not in queue_c]
-                queue_c.extend(queue_candidates)
+            eps = 0.3
+            min_cluster_size = 20
+            X = cloud.point.positions.numpy()[:, :2]
+            db = DBSCAN(eps=eps, min_samples=min_cluster_size).fit(X)
+            labels = db.labels_
+        elif method == "kmeans":
+            from sklearn.cluster import KMeans
 
-            clusters_c.append(queue_c)
-            queue_c.clear()
+            num_clusters = 350
+            X = cloud.point.positions.numpy()[:, :2]
+            labels = KMeans(n_clusters=num_clusters, n_init="auto").fit_predict(X)
+        else:
+            raise NotImplementedError(f"Method [{method}] not available")
 
-        print(clusters_c)
+        # Get max number of labels
+        num_labels = labels.max() + 1
 
-    def extract_clusters(self, cloud):
-        # downsample the input cloud
-        vg = cloud.make_voxel_grid_filter()
-        vg.set_leaf_size(self._voxel_size, self._voxel_size, self._voxel_size)
-        cloud_ds = vg.filter()
-
-        # creating the kdtree object for the searching
-        tree = cloud_ds.make_kdtree()
-
-        # perform Euclidean Clustering
-        ec = cloud_ds.make_EuclideanClusterExtraction()
-        ec.set_ClusterTolerance(self._cluster_tolerance)
-        ec.set_MinClusterSize(self._min_cluster_size)
-        ec.set_MaxClusterSize(self._max_cluster_size)
-        ec.set_SearchMethod(tree)
-        cluster_indices = ec.Extract()
-
-        if not cluster_indices:
-            print("No clusters found in the pointcloud.")
-            return
-
-        # get cluster points
+        # Prepare output clouds
         clusters = []
-        for j, indices in enumerate(cluster_indices):
-            # cluster = pcl.PointCloud()
-            cluster = []
-            points = np.zeros((len(indices), 3), dtype=np.float32)
-            for i, indice in enumerate(indices):
-                points[i][0] = cloud_ds[indice][0]
-                points[i][1] = cloud_ds[indice][1]
-                points[i][2] = cloud_ds[indice][2]
-            cluster.from_array(points)
-            clusters.append(cluster)
+        for i in range(num_labels):
+            mask = labels == i
+            seg_cloud = o3d.t.geometry.PointCloud(cloud.select_by_mask(mask))
+            clusters.append(seg_cloud)
+
         return clusters
 
     def filter_tree_clusters(self, clusters):
         tree_clouds = []
         for cluster in clusters:
-            isInvalidCluster = (
+            is_invalid_cluster = (
                 (not self.is_cluster_alignment_straight_enough(cluster))
                 or self.is_cluster_too_low(cluster)
                 or self.is_cluster_radius_too_big(cluster)
             )
 
-            if isInvalidCluster:
+            if is_invalid_cluster:
                 continue
             else:
                 tree_clouds.append(cluster)
@@ -154,7 +143,7 @@ class TreeSegmentation(BaseTask):
         return True
 
     def get_cluster_dimensions(self, cluster):
-        cluster_np = cluster.to_array()
+        cluster_np = cluster.point.positions.numpy()
         cluster_np_dim = np.max(cluster_np, axis=0) - np.min(cluster_np, axis=0)
         cluster_min_z = float(np.min(cluster_np, axis=0)[2])
         cluster_np_dim = cluster_np_dim.tolist()
@@ -167,7 +156,7 @@ class TreeSegmentation(BaseTask):
         return cluster_dim
 
     def compute_pca(self, cluster):
-        cluster_np = cluster.to_array()
+        cluster_np = cluster.point.positions.numpy()
         # Center the data by subtracting the mean
         mean = np.mean(cluster_np, axis=0)
         centered_data = cluster_np - mean
@@ -190,19 +179,19 @@ class TreeSegmentation(BaseTask):
     def compute_dbh(self, cloud):
         # passthrough filter to get the trunk points
         cluster_dim = self.get_cluster_dimensions(cloud)
-        passthrough = cloud.make_passthrough_filter()
-        passthrough.set_filter_field_name("z")
-        passthrough.set_filter_limits(
-            cluster_dim["min_z"], cluster_dim["min_z"] + self._max_trunk_height
-        )
-        cloud_filtered = passthrough.filter()
+
+        # Get bounding box and constrain the H size
+        bbox = cloud.get_axis_aligned_bounding_box()
+        min_bound = bbox.get_center() - bbox.get_half_extent()
+        max_bound = bbox.get_center() + bbox.get_half_extent()
+        max_bound[2] = cluster_dim["min_z"] + self._max_trunk_height
+        bbox = o3d.t.geometry.AxisAlignedBoundingBox(min_bound, max_bound)
+
+        cloud_filtered = cloud.crop(bbox)
+
         if self._debug:
             print(
-                "DBH: Passthrough filter let "
-                + str(cloud_filtered.size)
-                + " of "
-                + str(cloud.size)
-                + "points."
+                f"DBH: Passthrough filter let {len(cloud_filtered.point.positions)} of {len(cloud.point.positions)} points."
             )
         # cloud_filtered = cloud
         if cloud_filtered.size < 10:
@@ -233,7 +222,7 @@ class TreeSegmentation(BaseTask):
 
     def compute_cluster_info(self, cluster):
         # compute cluster mean
-        cluster_np = cluster.to_array()
+        cluster_np = cluster.point.positions.numpy()
         cluster_mean = np.mean(cluster_np, axis=0)
         cluster_mean = cluster_mean.tolist()
         # compute cluster dimensions
