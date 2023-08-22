@@ -1,6 +1,6 @@
 from digiforest_analysis.tasks import BaseTask
 
-import open3d as o3d
+import pcl
 import numpy as np
 
 
@@ -31,7 +31,7 @@ class TreeSegmentation(BaseTask):
         assert len(cloud.point.normals) > 0
 
         # extract clusters
-        clusters = self.euclidean_clustering(cloud)
+        clusters = self.extract_clusters(cloud)
         if self._debug:
             print("Extracted " + str(len(clusters)) + " initial clusters.")
 
@@ -46,38 +46,6 @@ class TreeSegmentation(BaseTask):
             num_filtered_clusters = len(clusters) - len(tree_clouds)
             print("Filtered out " + str(num_filtered_clusters) + " clusters.")
         return tree_clouds, trees_info
-
-    def euclidean_clustering(self, cloud):
-
-        # Create KD-tree
-        cloud_copy = o3d.geometry.PointCloud(cloud.to_legacy())
-        kd_tree = o3d.geometry.KDTreeFlann(cloud_copy)
-
-        voxel_grid = o3d.geometry.VoxelGrid.create_from_point_cloud(
-            cloud_copy, voxel_size=0.05
-        )
-        print(voxel_grid)
-
-        clusters_c = []
-        queue_c = []
-
-        for i in range(np.asarray(cloud_copy.points).shape[0]):
-            queue_c.append(i)
-            for j in queue_c:
-                sub_cloud_indices = kd_tree.search_hybrid_vector_3d(
-                    query=cloud_copy.points[j],
-                    radius=self._cluster_tolerance,
-                    max_nn=20,
-                )
-                indices = np.asarray(sub_cloud_indices[1], dtype=np.int64)
-
-                queue_candidates = [k for k in indices if k not in queue_c]
-                queue_c.extend(queue_candidates)
-
-            clusters_c.append(queue_c)
-            queue_c.clear()
-
-        print(clusters_c)
 
     def extract_clusters(self, cloud):
         # downsample the input cloud
@@ -103,8 +71,7 @@ class TreeSegmentation(BaseTask):
         # get cluster points
         clusters = []
         for j, indices in enumerate(cluster_indices):
-            # cluster = pcl.PointCloud()
-            cluster = []
+            cluster = pcl.PointCloud()
             points = np.zeros((len(indices), 3), dtype=np.float32)
             for i, indice in enumerate(indices):
                 points[i][0] = cloud_ds[indice][0]
@@ -220,9 +187,9 @@ class TreeSegmentation(BaseTask):
         # fit cylinder
         seg = cloud_filtered.make_segmenter_normals(ksearch=20)
         seg.set_optimize_coefficients(True)
-        # seg.set_model_type(pcl.SACMODEL_CYLINDER)
+        seg.set_model_type(pcl.SACMODEL_CYLINDER)
         seg.set_normal_distance_weight(0.1)
-        # seg.set_method_type(pcl.SAC_RANSAC)
+        seg.set_method_type(pcl.SAC_RANSAC)
         seg.set_max_iterations(1000)
         seg.set_distance_threshold(0.10)
         seg.set_radius_limits(0, 0.5 * self._max_tree_diameter)
@@ -255,7 +222,6 @@ if __name__ == "__main__":
     import sys
     import json
     import matplotlib.pyplot as plt
-    from digiforest_analysis.utils import pcd
 
     print("Tree segmentation")
     if len(sys.argv) != 3:
@@ -266,59 +232,58 @@ if __name__ == "__main__":
         if extension != ".pcd":
             sys.exit("Input file must be a pcd file")
 
-    cloud, header = pcd.load(sys.argv[1], binary=True)
-    assert len(cloud.point.normals) > 0
+        print("Processing", sys.argv[1])
 
-    print("Processing", sys.argv[1])
+        cloud = pcl.PointCloud()
+        cloud._from_pcd_file(sys.argv[1].encode("utf-8"))
+        app = TreeSegmentation(
+            voxel_size=0.05,
+            cluster_tolerance=1.0,
+            min_cluster_size=100,
+            max_cluster_size=25000,
+            min_tree_height=1.0,
+            max_trunk_height=5.0,
+            max_tree_diameter=2.5,
+            min_gravity_alignment_score=0.0,
+            debug=True,
+        )
+        tree_clouds, trees_info = app.process(cloud=cloud)
 
-    app = TreeSegmentation(
-        voxel_size=0.05,
-        cluster_tolerance=1.0,
-        min_cluster_size=100,
-        max_cluster_size=25000,
-        min_tree_height=1.0,
-        max_trunk_height=5.0,
-        max_tree_diameter=2.5,
-        min_gravity_alignment_score=0.0,
-        debug=True,
-    )
-    tree_clouds, trees_info = app.process(cloud=cloud)
+        print("Found " + str(len(tree_clouds)) + " trees")
 
-    print("Found " + str(len(tree_clouds)) + " trees")
+        # Plot tree locations and DBH as scatter plot
+        trees_loc_x = []
+        trees_loc_y = []
+        trees_dbh = []
+        for tree_info in trees_info:
+            trees_loc_x.append(tree_info["mean"][0])
+            trees_loc_y.append(tree_info["mean"][1])
+            trees_dbh.append(tree_info["dbh"])
+        trees_area = [10**3 * 3.14 * (dbh / 2) ** 2 for dbh in trees_dbh]
 
-    # Plot tree locations and DBH as scatter plot
-    trees_loc_x = []
-    trees_loc_y = []
-    trees_dbh = []
-    for tree_info in trees_info:
-        trees_loc_x.append(tree_info["mean"][0])
-        trees_loc_y.append(tree_info["mean"][1])
-        trees_dbh.append(tree_info["dbh"])
-    trees_area = [10**3 * 3.14 * (dbh / 2) ** 2 for dbh in trees_dbh]
+        plt.scatter(
+            trees_loc_x, trees_loc_y, s=trees_area, color="blue", marker="o", alpha=0.5
+        )
+        # Add index labels to each point
+        for i, (xi, yi) in enumerate(zip(trees_loc_x, trees_loc_y)):
+            plt.text(xi + 0.1, yi + 0.1, str(i), fontsize=10, ha="center", va="bottom")
+        plt.xlabel("X-axis")
+        plt.ylabel("Y-axis")
+        plt.title("Tree Locations")
+        plt.legend()
+        plt.grid(True)
+        plt.show()
 
-    plt.scatter(
-        trees_loc_x, trees_loc_y, s=trees_area, color="blue", marker="o", alpha=0.5
-    )
-    # Add index labels to each point
-    for i, (xi, yi) in enumerate(zip(trees_loc_x, trees_loc_y)):
-        plt.text(xi + 0.1, yi + 0.1, str(i), fontsize=10, ha="center", va="bottom")
-    plt.xlabel("X-axis")
-    plt.ylabel("Y-axis")
-    plt.title("Tree Locations")
-    plt.legend()
-    plt.grid(True)
-    plt.show()
+        # Write output clusters to disk
+        for j, tree_cloud in enumerate(tree_clouds):
+            tree_name = "tree_cloud_" + str(j) + ".pcd"
+            tree_cloud_filename = os.path.join(sys.argv[2], tree_name)
+            tree_cloud.to_file(str.encode(tree_cloud_filename))
 
-    # Write output clusters to disk
-    for j, tree_cloud in enumerate(tree_clouds):
-        tree_name = "tree_cloud_" + str(j) + ".pcd"
-        tree_cloud_filename = os.path.join(sys.argv[2], tree_name)
-        tree_cloud.to_file(str.encode(tree_cloud_filename))
-
-    # write tree info
-    data = {"name": "John", "age": 30, "city": "New York"}
-    for j, tree_info in enumerate(trees_info):
-        tree_name = "tree_info_" + str(j) + ".json"
-        tree_info_filename = os.path.join(sys.argv[2], tree_name)
-        with open(tree_info_filename, "w") as json_file:
-            json.dump(tree_info, json_file, indent=4)
+        # write tree info
+        data = {"name": "John", "age": 30, "city": "New York"}
+        for j, tree_info in enumerate(trees_info):
+            tree_name = "tree_info_" + str(j) + ".json"
+            tree_info_filename = os.path.join(sys.argv[2], tree_name)
+            with open(tree_info_filename, "w") as json_file:
+                json.dump(tree_info, json_file, indent=4)

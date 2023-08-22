@@ -109,14 +109,10 @@ if __name__ == "__main__":
     app = GroundSegmentation(
         max_distance_to_plane=0.5,
         cell_size=4.0,
-        normal_thr=0.92,
+        normal_thr=0.90,
         box_size=80,
     )
     ground_cloud, forest_cloud = app.process(cloud=cloud)
     header_fix = {"VIEWPOINT": header["VIEWPOINT"]}
-    pcd.write(
-        ground_cloud, header_fix, os.path.join(sys.argv[2], "o3d_ground_cloud.pcd")
-    )
-    pcd.write(
-        forest_cloud, header_fix, os.path.join(sys.argv[2], "o3d_forest_cloud.pcd")
-    )
+    pcd.write(ground_cloud, header_fix, os.path.join(sys.argv[2], "ground_cloud.pcd"))
+    pcd.write(forest_cloud, header_fix, os.path.join(sys.argv[2], "forest_cloud.pcd"))
