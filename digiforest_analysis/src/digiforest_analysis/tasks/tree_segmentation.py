@@ -12,15 +12,13 @@ class TreeSegmentation(BaseTask):
         self._voxel_size = kwargs.get("voxel_size", 0.05)
         self._clustering_method = kwargs.get("clustering_method", "dbscan_sk")
 
-        self._cluster_tolerance = kwargs.get("cluster_tolerance", 0.10)
-        self._min_cluster_size = kwargs.get("min_cluster_size", 100)
-        self._max_cluster_size = kwargs.get("max_cluster_size", 10000)
-        self._min_tree_height = kwargs.get("min_tree_height", 2.0)
-        self._max_tree_diameter = kwargs.get("max_tree_diameter", 2.0)
+        # Filtering parameters
+        self._filter_clusters = kwargs.get("filter_clusters", True)
+        self._min_tree_height = kwargs.get("min_tree_height", 0.6)
+        self._max_tree_diameter = kwargs.get("max_tree_diameter", 3.0)
         self._min_gravity_alignment_score = kwargs.get(
             "min_gravity_alignment_score", 0.7
         )
-        self._max_trunk_height = kwargs.get("max_trunk_height", 5.0)
         self._debug = kwargs.get("debug", False)
 
     def _process(self, **kwargs):
@@ -41,17 +39,19 @@ class TreeSegmentation(BaseTask):
         if self._debug:
             print("Extracted " + str(len(clusters)) + " initial clusters.")
 
+        # Compute cluster attributes
+        clusters = self.compute_clusters_info(clusters)
+
         # Filter out implausible clusters
-        tree_clouds = self.filter_tree_clusters(clusters)
-        trees_info = []
-        for tree in tree_clouds:
-            cluster_info = self.compute_cluster_info(tree)
-            trees_info.append(cluster_info)
+        if self._filter_clusters:
+            filtered_clusters = self.filter_tree_clusters(clusters)
+        else:
+            filtered_clusters = clusters
 
         if self._debug:
-            num_filtered_clusters = len(clusters) - len(tree_clouds)
-            print("Filtered out " + str(num_filtered_clusters) + " clusters.")
-        return tree_clouds, trees_info
+            num_filtered_clusters = len(clusters) - len(filtered_clusters)
+            print(f"Filtered out {num_filtered_clusters} clusters.")
+        return filtered_clusters
 
     def prefiltering(self, cloud, **kwargs):
         # Filter by Z-normals
@@ -99,61 +99,56 @@ class TreeSegmentation(BaseTask):
         for i in range(num_labels):
             mask = labels == i
             seg_cloud = o3d.t.geometry.PointCloud(cloud.select_by_mask(mask))
-            clusters.append(seg_cloud)
+            clusters.append({"cloud": seg_cloud, "info": {}})
 
         return clusters
 
     def filter_tree_clusters(self, clusters):
-        tree_clouds = []
-        for cluster in clusters:
-            is_invalid_cluster = (
-                (not self.is_cluster_alignment_straight_enough(cluster))
-                or self.is_cluster_too_low(cluster)
-                or self.is_cluster_radius_too_big(cluster)
-            )
+        filtered_clusters = []
+        for i, cluster in enumerate(clusters):
+            if self._debug:
+                print(f"-- Cluster {i} --")
+            valid_alignment = self.check_cluster_alignment(cluster)
+            valid_height = self.check_cluster_height(cluster)
+            valid_size = self.check_cluster_size(cluster)
 
-            if is_invalid_cluster:
-                continue
-            else:
-                tree_clouds.append(cluster)
-        return tree_clouds
+            if valid_alignment and valid_height and valid_size:
+                filtered_clusters.append(cluster)
 
-    def is_cluster_too_low(self, cluster):
-        cluster_dim = self.get_cluster_dimensions(cluster)
-        if cluster_dim["dim_z"] < self._min_tree_height:
-            return True
-        return False
+        return filtered_clusters
 
-    def is_cluster_radius_too_big(self, cluster):
-        cluster_dim = self.get_cluster_dimensions(cluster)
-        if (
-            cluster_dim["dim_x"] > self._max_tree_diameter
-            or cluster_dim["dim_y"] > self._max_tree_diameter
-        ):
-            return True
-        return False
-
-    def is_cluster_alignment_straight_enough(self, cluster):
-        cluster_pca = self.compute_pca(cluster)
-        cluster_principal_axis = cluster_pca[:, 0]
+    def check_cluster_alignment(self, cluster):
+        cluster_principal_axis = cluster["info"]["principal_axis"]
         gravity_axis = np.array([0, 0, 1])
         alignment_score = np.abs(np.dot(cluster_principal_axis, gravity_axis))
-        if alignment_score < self._min_gravity_alignment_score:
-            return False
-        return True
+        if alignment_score > self._min_gravity_alignment_score:
+            return True
+        if self._debug:
+            print(
+                f"Alignment check: {alignment_score} < {self._min_gravity_alignment_score}"
+            )
+        return False
 
-    def get_cluster_dimensions(self, cluster):
-        cluster_np = cluster.point.positions.numpy()
-        cluster_np_dim = np.max(cluster_np, axis=0) - np.min(cluster_np, axis=0)
-        cluster_min_z = float(np.min(cluster_np, axis=0)[2])
-        cluster_np_dim = cluster_np_dim.tolist()
-        cluster_dim = {
-            "dim_x": cluster_np_dim[0],
-            "dim_y": cluster_np_dim[1],
-            "dim_z": cluster_np_dim[2],
-            "min_z": cluster_min_z,
-        }
-        return cluster_dim
+    def check_cluster_height(self, cluster):
+        if cluster["info"]["dim_z"] > self._min_tree_height:
+            return True
+        if self._debug:
+            print(
+                f"Height check: {cluster['info']['dim_z'] } < {self._min_tree_height} "
+            )
+        return False
+
+    def check_cluster_size(self, cluster):
+        if (
+            cluster["info"]["dim_x"] < self._max_tree_diameter
+            or cluster["info"]["dim_y"] < self._max_tree_diameter
+        ):
+            return True
+        if self._debug:
+            print(
+                f"Size check: {cluster['info']['dim_x'] } > {self._max_tree_diameter} or {cluster['info']['dim_y'] } > {self._max_tree_diameter}"
+            )
+        return False
 
     def compute_pca(self, cluster):
         cluster_np = cluster.point.positions.numpy()
@@ -176,66 +171,34 @@ class TreeSegmentation(BaseTask):
         principal_components = sorted_eigenvectors[:, :num_components]
         return principal_components
 
-    def compute_dbh(self, cloud):
-        # passthrough filter to get the trunk points
-        cluster_dim = self.get_cluster_dimensions(cloud)
+    def compute_clusters_info(self, clusters):
+        for i, c in enumerate(clusters):
+            # compute cluster center
+            cluster_np = c["cloud"].point.positions.numpy()
+            cluster_mean = np.mean(cluster_np, axis=0)
+            cluster_mean = cluster_mean.tolist()
+            clusters[i]["info"]["mean"] = cluster_mean
 
-        # Get bounding box and constrain the H size
-        bbox = cloud.get_axis_aligned_bounding_box()
-        min_bound = bbox.get_center() - bbox.get_half_extent()
-        max_bound = bbox.get_center() + bbox.get_half_extent()
-        max_bound[2] = cluster_dim["min_z"] + self._max_trunk_height
-        bbox = o3d.t.geometry.AxisAlignedBoundingBox(min_bound, max_bound)
+            # Compute cluster dimensions
+            bbox = c["cloud"].get_axis_aligned_bounding_box()
+            min_bound = bbox.get_center() - bbox.get_half_extent()
+            max_bound = bbox.get_center() + bbox.get_half_extent()
 
-        cloud_filtered = cloud.crop(bbox)
+            clusters[i]["info"]["dim_x"] = (max_bound[0] - min_bound[0]).item()
+            clusters[i]["info"]["dim_y"] = (max_bound[1] - min_bound[1]).item()
+            clusters[i]["info"]["dim_z"] = (max_bound[2] - min_bound[2]).item()
+            clusters[i]["info"]["min_z"] = (min_bound[2]).item()
 
-        if self._debug:
-            print(
-                f"DBH: Passthrough filter let {len(cloud_filtered.point.positions)} of {len(cloud.point.positions)} points."
-            )
-        # cloud_filtered = cloud
-        if cloud_filtered.size < 10:
-            dbh = 0
-            if self._debug:
-                print("DBH Insufficient points for fitting a cylinder")
-            return dbh
+            # Main axis
+            cluster_pca = self.compute_pca(c["cloud"])
+            cluster_principal_axis = cluster_pca[:, 0]
+            clusters[i]["info"]["principal_axis"] = cluster_principal_axis.tolist()
 
-        # compute cloud normals
-        ne = cloud_filtered.make_NormalEstimation()
-        tree = cloud_filtered.make_kdtree()
-        ne.set_SearchMethod(tree)
-        ne.set_KSearch(20)
+            # # Compute DBH
+            # dbh = self.compute_dbh(c["cloud"])
+            clusters[i]["info"]["dbh"] = 0.5
 
-        # fit cylinder
-        seg = cloud_filtered.make_segmenter_normals(ksearch=20)
-        seg.set_optimize_coefficients(True)
-        # seg.set_model_type(pcl.SACMODEL_CYLINDER)
-        seg.set_normal_distance_weight(0.1)
-        # seg.set_method_type(pcl.SAC_RANSAC)
-        seg.set_max_iterations(1000)
-        seg.set_distance_threshold(0.10)
-        seg.set_radius_limits(0, 0.5 * self._max_tree_diameter)
-        [inliers_cylinder, coefficients_cylinder] = seg.segment()
-        radius_cylinder = coefficients_cylinder[6]
-        dbh = 2 * radius_cylinder
-        return dbh
-
-    def compute_cluster_info(self, cluster):
-        # compute cluster mean
-        cluster_np = cluster.point.positions.numpy()
-        cluster_mean = np.mean(cluster_np, axis=0)
-        cluster_mean = cluster_mean.tolist()
-        # compute cluster dimensions
-        cluster_dim = self.get_cluster_dimensions(cluster)
-        # compute DBH
-        dbh = self.compute_dbh(cluster)
-
-        cluster_info = {
-            "mean": cluster_mean,
-            "dim": cluster_dim,
-            "dbh": dbh,
-        }
-        return cluster_info
+        return clusters
 
 
 if __name__ == "__main__":
@@ -262,27 +225,46 @@ if __name__ == "__main__":
 
     app = TreeSegmentation(
         voxel_size=0.05,
-        cluster_tolerance=1.0,
-        min_cluster_size=100,
-        max_cluster_size=25000,
-        min_tree_height=1.0,
-        max_trunk_height=5.0,
+        min_tree_height=0.6,
+        max_trunk_height=2.0,
         max_tree_diameter=2.5,
-        min_gravity_alignment_score=0.0,
+        min_gravity_alignment_score=0.7,
         debug=True,
+        filter_clusters=False,
     )
-    tree_clouds, trees_info = app.process(cloud=cloud)
+    trees = app.process(cloud=cloud)
+    print("Found " + str(len(trees)) + " trees")
 
-    print("Found " + str(len(tree_clouds)) + " trees")
+    # Visualize clouds
+    n_points = len(cloud.point.positions)
+    cloud.paint_uniform_color([0.9, 0.9, 0.9])
+
+    viz_clouds = []
+    viz_clouds.append(cloud.to_legacy())
+
+    n_trees = len(trees)
+    cmap = plt.get_cmap("prism")
+    for i, t in enumerate(trees):
+        tree_cloud = t["cloud"]
+        tree_cloud.paint_uniform_color(cmap(i)[:3])
+        viz_clouds.append(tree_cloud.to_legacy())
+
+    o3d.visualization.draw_geometries(
+        viz_clouds,
+        zoom=0.5,
+        front=[0.79, 0.02, 0.60],
+        lookat=[2.61, 2.04, 1.53],
+        up=[-0.60, -0.012, 0.79],
+    )
 
     # Plot tree locations and DBH as scatter plot
     trees_loc_x = []
     trees_loc_y = []
     trees_dbh = []
-    for tree_info in trees_info:
-        trees_loc_x.append(tree_info["mean"][0])
-        trees_loc_y.append(tree_info["mean"][1])
-        trees_dbh.append(tree_info["dbh"])
+    for tree in trees:
+        trees_loc_x.append(tree["info"]["mean"][0])
+        trees_loc_y.append(tree["info"]["mean"][1])
+        trees_dbh.append(tree["info"]["dbh"])
     trees_area = [10**3 * 3.14 * (dbh / 2) ** 2 for dbh in trees_dbh]
 
     plt.scatter(
@@ -298,16 +280,16 @@ if __name__ == "__main__":
     plt.grid(True)
     plt.show()
 
-    # Write output clusters to disk
-    for j, tree_cloud in enumerate(tree_clouds):
-        tree_name = "tree_cloud_" + str(j) + ".pcd"
+    # Write output
+    for i, tree in enumerate(trees):
+        # Write clouds
+        tree_name = f"tree_cloud_{i}.pcd"
         tree_cloud_filename = os.path.join(sys.argv[2], tree_name)
-        tree_cloud.to_file(str.encode(tree_cloud_filename))
+        header_fix = {"VIEWPOINT": header["VIEWPOINT"]}
+        pcd.write(tree["cloud"], header_fix, tree_cloud_filename)
 
-    # write tree info
-    data = {"name": "John", "age": 30, "city": "New York"}
-    for j, tree_info in enumerate(trees_info):
-        tree_name = "tree_info_" + str(j) + ".json"
+        # write tree info
+        tree_name = f"tree_info_{i}.json"
         tree_info_filename = os.path.join(sys.argv[2], tree_name)
         with open(tree_info_filename, "w") as json_file:
-            json.dump(tree_info, json_file, indent=4)
+            json.dump(tree["info"], json_file, indent=4)
