@@ -113,6 +113,20 @@ if __name__ == "__main__":
         box_size=80,
     )
     ground_cloud, forest_cloud = app.process(cloud=cloud)
+
+    # Visualize clouds
+    ground_cloud.paint_uniform_color([0.0, 0.0, 1.0])
+    forest_cloud.paint_uniform_color([1.0, 0.0, 1.0])
+
+    o3d.visualization.draw_geometries(
+        [ground_cloud.to_legacy(), forest_cloud.to_legacy()],
+        zoom=0.3,
+        front=[0.79, 0.02, 0.60],
+        lookat=[2.61, 2.04, 1.53],
+        up=[-0.60, -0.012, 0.79],
+    )
+
+    # Write clouds
     header_fix = {"VIEWPOINT": header["VIEWPOINT"]}
     pcd.write(ground_cloud, header_fix, os.path.join(sys.argv[2], "ground_cloud.pcd"))
     pcd.write(forest_cloud, header_fix, os.path.join(sys.argv[2], "forest_cloud.pcd"))
