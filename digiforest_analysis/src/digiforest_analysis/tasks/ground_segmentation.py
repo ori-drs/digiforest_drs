@@ -12,7 +12,6 @@ class GroundSegmentation(BaseTask):
         self._cell_size = kwargs.get("cell_size", 4.0)
         self._normal_thr = kwargs.get("normal_thr", 0.95)
         self._cloud_boxsize = kwargs.get("box_size", 80)
-        self._debug = kwargs.get("debug", False)
 
     def _process(self, **kwargs):
         """ "

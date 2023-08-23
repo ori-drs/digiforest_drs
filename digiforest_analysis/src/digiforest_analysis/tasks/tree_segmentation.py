@@ -22,7 +22,6 @@ class TreeSegmentation(BaseTask):
         self._min_gravity_alignment_score = kwargs.get(
             "min_gravity_alignment_score", 0.1
         )
-        self._debug = kwargs.get("debug", False)
 
     def _process(self, **kwargs):
         """ "
@@ -72,9 +71,9 @@ class TreeSegmentation(BaseTask):
 
     def coarse_clustering(self, cloud, method="dbscan_o3d"):
         if self._cluster_2d:
-            X = cloud.point.positions.numpy()[:, :2]
+            points = cloud.point.positions.numpy()[:, :2]
         else:
-            X = cloud.point.positions.numpy()
+            points = cloud.point.positions.numpy()
 
         if method == "dbscan_o3d":
             eps = 0.8
@@ -88,14 +87,14 @@ class TreeSegmentation(BaseTask):
 
             eps = 0.3
             min_cluster_size = 20
-            db = DBSCAN(eps=eps, min_samples=min_cluster_size).fit(X)
+            db = DBSCAN(eps=eps, min_samples=min_cluster_size).fit(points)
             labels = db.labels_
 
         elif method == "hdbscan_sk":
             from sklearn.cluster import HDBSCAN
 
             min_cluster_size = 20
-            db = HDBSCAN(min_samples=min_cluster_size).fit(X)
+            db = HDBSCAN(min_samples=min_cluster_size).fit(points)
             labels = db.labels_
 
         elif method == "hdbscan":
@@ -104,13 +103,13 @@ class TreeSegmentation(BaseTask):
             clusterer = hdbscan.HDBSCAN(
                 min_cluster_size=20, algorithm="best", core_dist_n_jobs=1
             )
-            labels = clusterer.fit_predict(X)
+            labels = clusterer.fit_predict(points)
 
         elif method == "kmeans":
             from sklearn.cluster import KMeans
 
             num_clusters = 350
-            labels = KMeans(n_clusters=num_clusters, n_init="auto").fit_predict(X)
+            labels = KMeans(n_clusters=num_clusters, n_init="auto").fit_predict(points)
 
         else:
             raise NotImplementedError(f"Method [{method}] not available")
@@ -123,7 +122,7 @@ class TreeSegmentation(BaseTask):
         for i in range(num_labels):
             mask = labels == i
             seg_cloud = o3d.t.geometry.PointCloud(cloud.select_by_mask(mask))
-            clusters.append({"cloud": seg_cloud, "id": i, "info": {}})
+            clusters.append({"cloud": seg_cloud, "info": {"id": i}})
 
         return clusters
 
@@ -249,6 +248,7 @@ if __name__ == "__main__":
     """Minimal example"""
     import os
     import sys
+    import yaml
     import matplotlib.pyplot as plt
     from digiforest_analysis.utils import pcd
 
@@ -317,3 +317,20 @@ if __name__ == "__main__":
         lookat=[2.61, 2.04, 1.53],
         up=[-0.60, -0.012, 0.79],
     )
+
+    # Write output
+    for tree in trees:
+        # Write clouds
+        i = tree["info"]["id"]
+
+        # Write cloud
+        tree_name = f"tree_cloud_{i:04}.pcd"
+        tree_cloud_filename = os.path.join(sys.argv[2], tree_name)
+        header_fix = {"VIEWPOINT": header["VIEWPOINT"]}
+        pcd.write(tree["cloud"], header_fix, tree_cloud_filename)
+
+        # Write tree info
+        tree_name = f"tree_info_{i:04}.yaml"
+        tree_info_filename = os.path.join(sys.argv[2], tree_name)
+        with open(tree_info_filename, "w") as yaml_file:
+            yaml.dump(tree["info"], yaml_file, indent=4)
