@@ -312,7 +312,7 @@ if __name__ == "__main__":
 
     o3d.visualization.draw_geometries(
         viz_clouds,
-        zoom=0.3,
+        zoom=0.5,
         front=[0.79, 0.02, 0.60],
         lookat=[2.61, 2.04, 1.53],
         up=[-0.60, -0.012, 0.79],
