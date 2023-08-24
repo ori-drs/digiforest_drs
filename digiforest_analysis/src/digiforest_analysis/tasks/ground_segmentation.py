@@ -42,8 +42,8 @@ class GroundSegmentation(BaseTask):
         maxz = 10000000000
 
         cropping_box = o3d.t.geometry.AxisAlignedBoundingBox(
-            np.array([minx, miny, minz], dtype=np.float),
-            np.array([maxx, maxy, maxz], dtype=np.float),
+            np.array([minx, miny, minz]),
+            np.array([maxx, maxy, maxz]),
         )
 
         # Crop the point cloud
@@ -72,10 +72,8 @@ class GroundSegmentation(BaseTask):
         merged_cloud = o3d.t.geometry.PointCloud()
         for xx in d_x:
             for yy in d_y:
-                cell_midpoint = np.array([xx, yy, 0]).reshape((3, 1))
-
                 # Crop the cloud
-                cropped_cloud = self.crop_box(cloud, cell_midpoint, self._cell_size)
+                cropped_cloud = self.crop_box(cloud, (xx, yy), self._cell_size)
 
                 # Check if there are enough points
                 # if sub_cloud_indices[0] > 100:
