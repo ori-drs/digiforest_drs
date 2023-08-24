@@ -22,6 +22,21 @@ class GroundSegmentation(BaseTask):
         """
         cloud = kwargs.get("cloud")
 
+        # This requires to "pip install cloth-simulation-filter"
+        # import CSF
+        # csf = CSF.CSF()
+        # csf.params.bSloopSmooth = False
+        # csf.params.cloth_resolution = 4.0
+        # points = cloud.point.positions.numpy().tolist()
+        # csf.setPointCloud(points)
+        # ground_indices = CSF.VecInt()
+        # forest_indices = CSF.VecInt()
+        # csf.do_filtering(ground_indices, forest_indices)
+        # ground_indices = np.array(ground_indices, dtype=int)
+        # forest_indices = np.array(forest_indices, dtype=int)
+        # ground_cloud = cloud.select_by_index(ground_indices)
+        # forest_cloud = cloud.select_by_index(forest_indices)
+
         # Filter by normal
         mask = cloud.point.normals[:, 2] > self._normal_thr
         ground_cloud = cloud.select_by_mask(mask)
