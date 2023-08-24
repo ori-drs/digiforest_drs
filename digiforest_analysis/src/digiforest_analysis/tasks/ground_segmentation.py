@@ -33,14 +33,27 @@ class GroundSegmentation(BaseTask):
 
         return ground_cloud, forest_cloud
 
+    def crop_box(self, cloud, midpoint, boxsize):
+        minx = midpoint[0] - boxsize / 2
+        miny = midpoint[1] - boxsize / 2
+        minz = -1000000000
+        maxx = midpoint[0] + boxsize / 2
+        maxy = midpoint[1] + boxsize / 2
+        maxz = 10000000000
+
+        cropping_box = o3d.t.geometry.AxisAlignedBoundingBox(
+            np.array([minx, miny, minz], dtype=np.float),
+            np.array([maxx, maxy, maxz], dtype=np.float),
+        )
+
+        # Crop the point cloud
+        cropped_point_cloud = cloud.crop(cropping_box)
+        return cropped_point_cloud
+
     def compute_ground_cloud(self, cloud):
         """
         filter the points of the input cloud by fitting planes on each cell of a fixed-size grid
         """
-
-        # Create KD-tree
-        cloud_copy = o3d.geometry.PointCloud(cloud.to_legacy())
-        kd_tree = o3d.geometry.KDTreeFlann(cloud_copy)
 
         # number of cells is (self._cloud_boxsize/cell_size) squared
         mid_point = cloud.point.positions.mean(dim=0)
@@ -56,36 +69,35 @@ class GroundSegmentation(BaseTask):
             self._cell_size,
         )
 
-        cloud_inliers = []
+        merged_cloud = o3d.t.geometry.PointCloud()
         for xx in d_x:
             for yy in d_y:
                 cell_midpoint = np.array([xx, yy, 0]).reshape((3, 1))
-                sub_cloud_indices = kd_tree.search_radius_vector_3d(
-                    query=cell_midpoint, radius=self._cell_size
-                )
 
-                # Extract indices from kd-tree output
-                indices = np.asarray(sub_cloud_indices[1], dtype=np.int64)
+                # Crop the cloud
+                cropped_cloud = self.crop_box(cloud, cell_midpoint, self._cell_size)
 
                 # Check if there are enough points
-                if sub_cloud_indices[0] > 100:
-                    # Mask the cloud
-                    sub_cloud = cloud.select_by_index(indices=indices)
-
+                # if sub_cloud_indices[0] > 100:
+                if len(cropped_cloud.point.positions) > 100:
                     # Run plane fitting
-                    plane_model, inliers = sub_cloud.to_legacy().segment_plane(
+
+                    plane_model, inliers = cropped_cloud.to_legacy().segment_plane(
                         distance_threshold=self._max_distance_to_plane,
                         ransac_n=3,
                         num_iterations=1000,
                     )
-                    [a, b, c, d] = plane_model
-
                     if len(inliers) > 20:
-                        # This is ugly and requires to flatten the vector afterwards
-                        cloud_inliers.extend(indices[inliers])
+                        if not ("positions" in merged_cloud.point):
+                            merged_cloud = cropped_cloud.select_by_index(
+                                indices=inliers
+                            )
+                        else:
+                            merged_cloud += cropped_cloud.select_by_index(
+                                indices=inliers
+                            )
 
-        cloud_inliers = np.asarray(cloud_inliers, dtype=np.int64).flatten()
-        return cloud.select_by_index(cloud_inliers)
+        return merged_cloud
 
 
 if __name__ == "__main__":
