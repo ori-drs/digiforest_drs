@@ -140,7 +140,6 @@ def generate_height_map(filename: str):
 
 
 def generate_height_maps(directory: str, output_dir: str):
-
     if not os.path.isdir(directory):
         print("Cannot find the folder", directory)
         return
