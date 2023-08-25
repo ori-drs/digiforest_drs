@@ -22,41 +22,25 @@ class GroundSegmentation(BaseTask):
             _type_: _description_
         """
         cloud = kwargs.get("cloud")
+        method = kwargs.get("method", "default")
 
-        # Filter by normal
-        mask = cloud.point.normals[:, 2] > self._normal_thr
-        ground_cloud = cloud.select_by_mask(mask)
-        forest_cloud = cloud.select_by_mask(mask, invert=True)
-
-        # Get the terain by plane fitting
-        ground_cloud = self.compute_ground_cloud(ground_cloud)
+        if method == "default":
+            ground_cloud, forest_cloud = self.run_default(cloud)
+        elif method == "legacy":
+            ground_cloud, forest_cloud = self.run_legacy(cloud)
+        elif method == "csf":
+            ground_cloud, forest_cloud = self.run_csf(cloud)
 
         return ground_cloud, forest_cloud
 
-    def crop_box(self, cloud, midpoint, boxsize):
-        minx = midpoint[0] - boxsize / 2
-        miny = midpoint[1] - boxsize / 2
-        minz = -1000000000
-        maxx = midpoint[0] + boxsize / 2
-        maxy = midpoint[1] + boxsize / 2
-        maxz = 10000000000
+    def run_default(self, cloud):
+        # Filter by normal
+        mask = cloud.point.normals[:, 2] > self._normal_thr
+        coarse_ground_cloud = cloud.select_by_mask(mask)
+        forest_cloud = cloud.select_by_mask(mask, invert=True)
 
-        cropping_box = o3d.t.geometry.AxisAlignedBoundingBox(
-            np.array([minx, miny, minz]),
-            np.array([maxx, maxy, maxz]),
-        )
-
-        # Crop the point cloud
-        cropped_point_cloud = cloud.crop(cropping_box)
-        return cropped_point_cloud
-
-    def compute_ground_cloud(self, cloud):
-        """
-        filter the points of the input cloud by fitting planes on each cell of a fixed-size grid
-        """
-
-        # number of cells is (self._cloud_boxsize/cell_size) squared
-        mid_point = cloud.point.positions.mean(dim=0)
+        # Fit plane per cell
+        mid_point = coarse_ground_cloud.point.positions.mean(dim=0)
 
         d_x = np.arange(
             mid_point[0].item() - self._cloud_boxsize / 2,
@@ -69,33 +53,129 @@ class GroundSegmentation(BaseTask):
             self._cell_size,
         )
 
-        merged_cloud = o3d.t.geometry.PointCloud()
+        def crop_box(cloud, midpoint, boxsize):
+            minx = midpoint[0] - boxsize / 2
+            miny = midpoint[1] - boxsize / 2
+            minz = -1000000000
+            maxx = midpoint[0] + boxsize / 2
+            maxy = midpoint[1] + boxsize / 2
+            maxz = 10000000000
+
+            cropping_box = o3d.t.geometry.AxisAlignedBoundingBox(
+                np.array([minx, miny, minz]),
+                np.array([maxx, maxy, maxz]),
+            )
+            # Crop the point cloud
+            cropped_point_cloud = cloud.crop(cropping_box)
+            return cropped_point_cloud
+
+        refined_ground_cloud = o3d.t.geometry.PointCloud()
         for xx in d_x:
             for yy in d_y:
                 # Crop the cloud
-                cropped_cloud = self.crop_box(cloud, (xx, yy), self._cell_size)
+                cropped_cloud = crop_box(cloud, (xx, yy), self._cell_size)
 
                 # Check if there are enough points
-                # if sub_cloud_indices[0] > 100:
                 if len(cropped_cloud.point.positions) > 100:
                     # Run plane fitting
-
                     plane_model, inliers = cropped_cloud.to_legacy().segment_plane(
                         distance_threshold=self._max_distance_to_plane,
                         ransac_n=3,
                         num_iterations=1000,
                     )
                     if len(inliers) > 20:
-                        if not ("positions" in merged_cloud.point):
-                            merged_cloud = cropped_cloud.select_by_index(
+                        if not ("positions" in refined_ground_cloud.point):
+                            refined_ground_cloud = cropped_cloud.select_by_index(
                                 indices=inliers
                             )
                         else:
-                            merged_cloud += cropped_cloud.select_by_index(
+                            refined_ground_cloud += cropped_cloud.select_by_index(
                                 indices=inliers
                             )
 
-        return merged_cloud
+        return refined_ground_cloud, forest_cloud
+
+    def run_legacy(self, cloud):
+        # Filter by normal
+        mask = cloud.point.normals[:, 2] > self._normal_thr
+        coarse_ground_cloud = cloud.select_by_mask(mask)
+        forest_cloud = cloud.select_by_mask(mask, invert=True)
+
+        # Fit plane per cell
+        # number of cells is (self._cloud_boxsize/cell_size) squared
+        mid_point = coarse_ground_cloud.point.positions.mean(dim=0)
+
+        d_x = np.arange(
+            mid_point[0].item() - self._cloud_boxsize / 2,
+            mid_point[0].item() + self._cloud_boxsize / 2,
+            self._cell_size,
+        )
+        d_y = np.arange(
+            mid_point[1].item() - self._cloud_boxsize / 2,
+            mid_point[1].item() + self._cloud_boxsize / 2,
+            self._cell_size,
+        )
+
+        def get_cell_mask(cloud, midpoint, boxsize):
+            minx = midpoint[0] - boxsize / 2
+            miny = midpoint[1] - boxsize / 2
+            maxx = midpoint[0] + boxsize / 2
+            maxy = midpoint[1] + boxsize / 2
+            mask = (
+                (cloud.point.positions[:, 0] >= minx)
+                & (cloud.point.positions[:, 0] < maxx)
+                & (cloud.point.positions[:, 1] >= miny)
+                & (cloud.point.positions[:, 0] < maxy)
+            )
+            return mask
+
+        cloud_inliers = []
+        for xx in d_x:
+            for yy in d_y:
+                cell_mask = get_cell_mask(
+                    coarse_ground_cloud, (xx, yy), self._cell_size
+                )
+
+                # Check if there are enough points
+                if cell_mask.numpy().sum() > 100:
+                    # Mask the cloud
+                    sub_cloud = coarse_ground_cloud.select_by_mask(cell_mask)
+
+                    # Run plane fitting
+                    plane_model, inliers = sub_cloud.to_legacy().segment_plane(
+                        distance_threshold=self._max_distance_to_plane,
+                        ransac_n=3,
+                        num_iterations=1000,
+                    )
+
+                    if len(inliers) > 20:
+                        # This is ugly and requires to flatten the vector afterwards
+                        cloud_inliers.extend(inliers)
+
+        cloud_inliers = np.asarray(cloud_inliers, dtype=np.int64).flatten()
+        refined_ground_cloud = coarse_ground_cloud.select_by_index(cloud_inliers)
+
+        return refined_ground_cloud, forest_cloud
+
+    def run_csf(self, cloud):
+        # This requires to "pip install cloth-simulation-filter"
+        import CSF
+
+        csf = CSF.CSF()
+        csf.params.bSloopSmooth = False
+        csf.params.cloth_resolution = 4.0
+        points = cloud.point.positions.numpy().tolist()
+        csf.setPointCloud(points)
+        ground_indices = CSF.VecInt()
+        forest_indices = CSF.VecInt()
+        csf.do_filtering(ground_indices, forest_indices)
+        ground_indices = np.array(ground_indices, dtype=int)
+        forest_indices = np.array(forest_indices, dtype=int)
+
+        ground_cloud = cloud.select_by_index(ground_indices)
+        forest_cloud = cloud.select_by_index(forest_indices)
+
+        return ground_cloud, forest_cloud
 
 
 if __name__ == "__main__":
@@ -122,7 +202,10 @@ if __name__ == "__main__":
         normal_thr=0.92,
         box_size=80,
     )
-    ground_cloud, forest_cloud = app.process(cloud=cloud)
+    ground_cloud, forest_cloud = app.process(cloud=cloud, method="default")
+    ground_cloud, forest_cloud = app.process(cloud=cloud, method="legacy")
+    ground_cloud, forest_cloud = app.process(cloud=cloud, method="csf")
+
     header_fix = {"VIEWPOINT": header["VIEWPOINT"]}
     pcd.write(
         ground_cloud, header_fix, os.path.join(sys.argv[2], "o3d_ground_cloud.pcd")
