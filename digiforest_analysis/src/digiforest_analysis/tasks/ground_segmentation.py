@@ -8,6 +8,7 @@ class GroundSegmentation(BaseTask):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
+        self._voxel_filter_size = kwargs.get("voxel_filter_size", 0.05)
         self._max_distance_to_plane = kwargs.get("max_distance_to_plane", 0.5)
         self._cell_size = kwargs.get("cell_size", 4.0)
         self._normal_thr = kwargs.get("normal_thr", 0.95)
@@ -26,8 +27,8 @@ class GroundSegmentation(BaseTask):
 
         if method == "default":
             ground_cloud, forest_cloud = self.run_default(cloud)
-        elif method == "legacy":
-            ground_cloud, forest_cloud = self.run_legacy(cloud)
+        elif method == "indexing":
+            ground_cloud, forest_cloud = self.run_indexing(cloud)
         elif method == "csf":
             ground_cloud, forest_cloud = self.run_csf(cloud)
 
@@ -38,6 +39,11 @@ class GroundSegmentation(BaseTask):
         mask = cloud.point.normals[:, 2] > self._normal_thr
         coarse_ground_cloud = cloud.select_by_mask(mask)
         forest_cloud = cloud.select_by_mask(mask, invert=True)
+
+        if self._voxel_filter_size > 0.0:
+            coarse_ground_cloud = coarse_ground_cloud.voxel_down_sample(
+                voxel_size=self._voxel_filter_size
+            )
 
         # Fit plane per cell
         mid_point = coarse_ground_cloud.point.positions.mean(dim=0)
@@ -95,11 +101,16 @@ class GroundSegmentation(BaseTask):
 
         return refined_ground_cloud, forest_cloud
 
-    def run_legacy(self, cloud):
+    def run_indexing(self, cloud):
         # Filter by normal
         mask = cloud.point.normals[:, 2] > self._normal_thr
         coarse_ground_cloud = cloud.select_by_mask(mask)
         forest_cloud = cloud.select_by_mask(mask, invert=True)
+
+        if self._voxel_filter_size > 0.0:
+            coarse_ground_cloud = coarse_ground_cloud.voxel_down_sample(
+                voxel_size=self._voxel_filter_size
+            )
 
         # Fit plane per cell
         # number of cells is (self._cloud_boxsize/cell_size) squared
@@ -163,8 +174,9 @@ class GroundSegmentation(BaseTask):
 
         csf = CSF.CSF()
         csf.params.bSloopSmooth = False
-        csf.params.cloth_resolution = 4.0
+        csf.params.cloth_resolution = self._cell_size
         points = cloud.point.positions.numpy().tolist()
+
         csf.setPointCloud(points)
         ground_indices = CSF.VecInt()
         forest_indices = CSF.VecInt()
@@ -195,16 +207,13 @@ if __name__ == "__main__":
     cloud, header = pcd.load(sys.argv[1], binary=True)
     assert len(cloud.point.normals) > 0
 
-    # Open3D implementation
     app = GroundSegmentation(
         max_distance_to_plane=0.5,
         cell_size=4.0,
         normal_thr=0.92,
         box_size=80,
     )
-    ground_cloud, forest_cloud = app.process(cloud=cloud, method="default")
-    ground_cloud, forest_cloud = app.process(cloud=cloud, method="legacy")
-    ground_cloud, forest_cloud = app.process(cloud=cloud, method="csf")
+    ground_cloud, forest_cloud = app.process(cloud=cloud, method="indexing")
 
     header_fix = {"VIEWPOINT": header["VIEWPOINT"]}
     pcd.write(
