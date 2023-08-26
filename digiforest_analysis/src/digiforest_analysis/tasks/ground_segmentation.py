@@ -213,7 +213,7 @@ if __name__ == "__main__":
         normal_thr=0.92,
         box_size=80,
     )
-    ground_cloud, forest_cloud = app.process(cloud=cloud, method="indexing")
+    ground_cloud, forest_cloud = app.process(cloud=cloud, method="default")
 
     header_fix = {"VIEWPOINT": header["VIEWPOINT"]}
     pcd.write(
