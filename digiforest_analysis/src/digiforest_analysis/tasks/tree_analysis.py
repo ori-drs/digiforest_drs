@@ -25,7 +25,6 @@ class TreeAnalysis(BaseTask):
         return filtered_trees
 
     def cylinder_fit(self, points, xm=0, ym=0, xr=0, yr=0, r=1):
-
         from scipy.optimize import least_squares
         import numpy as np
 
