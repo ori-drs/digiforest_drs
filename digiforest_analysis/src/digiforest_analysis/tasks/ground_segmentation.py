@@ -8,6 +8,7 @@ class GroundSegmentation(BaseTask):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
+        self._voxel_filter_size = kwargs.get("voxel_filter_size", 0.05)
         self._max_distance_to_plane = kwargs.get("max_distance_to_plane", 0.5)
         self._cell_size = kwargs.get("cell_size", 4.0)
         self._normal_thr = kwargs.get("normal_thr", 0.95)
@@ -22,28 +23,30 @@ class GroundSegmentation(BaseTask):
             _type_: _description_
         """
         cloud = kwargs.get("cloud")
+        method = kwargs.get("method", "default")
 
-        # Filter by normal
-        mask = cloud.point.normals[:, 2] > self._normal_thr
-        ground_cloud = cloud.select_by_mask(mask)
-        forest_cloud = cloud.select_by_mask(mask, invert=True)
-
-        # Get the terain by plane fitting
-        ground_cloud = self.compute_ground_cloud(ground_cloud)
+        if method == "default":
+            ground_cloud, forest_cloud = self.run_default(cloud)
+        elif method == "indexing":
+            ground_cloud, forest_cloud = self.run_indexing(cloud)
+        elif method == "csf":
+            ground_cloud, forest_cloud = self.run_csf(cloud)
 
         return ground_cloud, forest_cloud
 
-    def compute_ground_cloud(self, cloud):
-        """
-        filter the points of the input cloud by fitting planes on each cell of a fixed-size grid
-        """
+    def run_default(self, cloud):
+        # Filter by normal
+        mask = cloud.point.normals[:, 2] > self._normal_thr
+        coarse_ground_cloud = cloud.select_by_mask(mask)
+        forest_cloud = cloud.select_by_mask(mask, invert=True)
 
-        # Create KD-tree
-        cloud_copy = o3d.geometry.PointCloud(cloud.to_legacy())
-        kd_tree = o3d.geometry.KDTreeFlann(cloud_copy)
+        if self._voxel_filter_size > 0.0:
+            coarse_ground_cloud = coarse_ground_cloud.voxel_down_sample(
+                voxel_size=self._voxel_filter_size
+            )
 
-        # number of cells is (self._cloud_boxsize/cell_size) squared
-        mid_point = cloud.point.positions.mean(dim=0)
+        # Fit plane per cell
+        mid_point = coarse_ground_cloud.point.positions.mean(dim=0)
 
         d_x = np.arange(
             mid_point[0].item() - self._cloud_boxsize / 2,
@@ -56,21 +59,98 @@ class GroundSegmentation(BaseTask):
             self._cell_size,
         )
 
+        def crop_box(cloud, midpoint, boxsize):
+            minx = midpoint[0] - boxsize / 2
+            miny = midpoint[1] - boxsize / 2
+            minz = -1000000000
+            maxx = midpoint[0] + boxsize / 2
+            maxy = midpoint[1] + boxsize / 2
+            maxz = 10000000000
+
+            cropping_box = o3d.t.geometry.AxisAlignedBoundingBox(
+                np.array([minx, miny, minz]),
+                np.array([maxx, maxy, maxz]),
+            )
+            # Crop the point cloud
+            cropped_point_cloud = cloud.crop(cropping_box)
+            return cropped_point_cloud
+
+        refined_ground_cloud = o3d.t.geometry.PointCloud()
+        for xx in d_x:
+            for yy in d_y:
+                # Crop the cloud
+                cropped_cloud = crop_box(cloud, (xx, yy), self._cell_size)
+
+                # Check if there are enough points
+                if len(cropped_cloud.point.positions) > 100:
+                    # Run plane fitting
+                    plane_model, inliers = cropped_cloud.to_legacy().segment_plane(
+                        distance_threshold=self._max_distance_to_plane,
+                        ransac_n=3,
+                        num_iterations=1000,
+                    )
+                    if len(inliers) > 20:
+                        if not ("positions" in refined_ground_cloud.point):
+                            refined_ground_cloud = cropped_cloud.select_by_index(
+                                indices=inliers
+                            )
+                        else:
+                            refined_ground_cloud += cropped_cloud.select_by_index(
+                                indices=inliers
+                            )
+
+        return refined_ground_cloud, forest_cloud
+
+    def run_indexing(self, cloud):
+        # Filter by normal
+        mask = cloud.point.normals[:, 2] > self._normal_thr
+        coarse_ground_cloud = cloud.select_by_mask(mask)
+        forest_cloud = cloud.select_by_mask(mask, invert=True)
+
+        if self._voxel_filter_size > 0.0:
+            coarse_ground_cloud = coarse_ground_cloud.voxel_down_sample(
+                voxel_size=self._voxel_filter_size
+            )
+
+        # Fit plane per cell
+        # number of cells is (self._cloud_boxsize/cell_size) squared
+        mid_point = coarse_ground_cloud.point.positions.mean(dim=0)
+
+        d_x = np.arange(
+            mid_point[0].item() - self._cloud_boxsize / 2,
+            mid_point[0].item() + self._cloud_boxsize / 2,
+            self._cell_size,
+        )
+        d_y = np.arange(
+            mid_point[1].item() - self._cloud_boxsize / 2,
+            mid_point[1].item() + self._cloud_boxsize / 2,
+            self._cell_size,
+        )
+
+        def get_cell_mask(cloud, midpoint, boxsize):
+            minx = midpoint[0] - boxsize / 2
+            miny = midpoint[1] - boxsize / 2
+            maxx = midpoint[0] + boxsize / 2
+            maxy = midpoint[1] + boxsize / 2
+            mask = (
+                (cloud.point.positions[:, 0] >= minx)
+                & (cloud.point.positions[:, 0] < maxx)
+                & (cloud.point.positions[:, 1] >= miny)
+                & (cloud.point.positions[:, 0] < maxy)
+            )
+            return mask
+
         cloud_inliers = []
         for xx in d_x:
             for yy in d_y:
-                cell_midpoint = np.array([xx, yy, 0]).reshape((3, 1))
-                sub_cloud_indices = kd_tree.search_radius_vector_3d(
-                    query=cell_midpoint, radius=self._cell_size
+                cell_mask = get_cell_mask(
+                    coarse_ground_cloud, (xx, yy), self._cell_size
                 )
 
-                # Extract indices from kd-tree output
-                indices = np.asarray(sub_cloud_indices[1], dtype=np.int64)
-
                 # Check if there are enough points
-                if sub_cloud_indices[0] > 100:
+                if cell_mask.numpy().sum() > 100:
                     # Mask the cloud
-                    sub_cloud = cloud.select_by_index(indices=indices)
+                    sub_cloud = coarse_ground_cloud.select_by_mask(cell_mask)
 
                     # Run plane fitting
                     plane_model, inliers = sub_cloud.to_legacy().segment_plane(
@@ -78,14 +158,36 @@ class GroundSegmentation(BaseTask):
                         ransac_n=3,
                         num_iterations=1000,
                     )
-                    [a, b, c, d] = plane_model
 
                     if len(inliers) > 20:
                         # This is ugly and requires to flatten the vector afterwards
-                        cloud_inliers.extend(indices[inliers])
+                        cloud_inliers.extend(inliers)
 
         cloud_inliers = np.asarray(cloud_inliers, dtype=np.int64).flatten()
-        return cloud.select_by_index(cloud_inliers)
+        refined_ground_cloud = coarse_ground_cloud.select_by_index(cloud_inliers)
+
+        return refined_ground_cloud, forest_cloud
+
+    def run_csf(self, cloud):
+        # This requires to "pip install cloth-simulation-filter"
+        import CSF
+
+        csf = CSF.CSF()
+        csf.params.bSloopSmooth = False
+        csf.params.cloth_resolution = self._cell_size
+        points = cloud.point.positions.numpy().tolist()
+
+        csf.setPointCloud(points)
+        ground_indices = CSF.VecInt()
+        forest_indices = CSF.VecInt()
+        csf.do_filtering(ground_indices, forest_indices)
+        ground_indices = np.array(ground_indices, dtype=int)
+        forest_indices = np.array(forest_indices, dtype=int)
+
+        ground_cloud = cloud.select_by_index(ground_indices)
+        forest_cloud = cloud.select_by_index(forest_indices)
+
+        return ground_cloud, forest_cloud
 
 
 if __name__ == "__main__":
@@ -105,14 +207,14 @@ if __name__ == "__main__":
     cloud, header = pcd.load(sys.argv[1], binary=True)
     assert len(cloud.point.normals) > 0
 
-    # Open3D implementation
     app = GroundSegmentation(
         max_distance_to_plane=0.5,
         cell_size=4.0,
         normal_thr=0.92,
         box_size=80,
     )
-    ground_cloud, forest_cloud = app.process(cloud=cloud)
+    ground_cloud, forest_cloud = app.process(cloud=cloud, method="default")
+
     header_fix = {"VIEWPOINT": header["VIEWPOINT"]}
     pcd.write(
         ground_cloud, header_fix, os.path.join(sys.argv[2], "o3d_ground_cloud.pcd")
