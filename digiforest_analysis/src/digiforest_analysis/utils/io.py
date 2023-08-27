@@ -1,11 +1,16 @@
+from pathlib import Path
+
 import fileinput
 import open3d as o3d
 import sys
 
 
 def load(filename: str, binary=True):
-    cloud = o3d.t.io.read_point_cloud(filename)
-    header = load_header(filename, binary=binary)
+    path = Path(filename)
+    file_format = path.suffix
+    cloud = o3d.t.io.read_point_cloud(str(path))
+    header = load_header(filename, file_format, binary=binary)
+
     return cloud, header
 
 
@@ -18,20 +23,23 @@ def write_pcl(cloud, header, filename):
     cloud.to_file(str.encode(filename), ascii=False)
 
     # Update header
-    original_header = load_header(filename, binary=True)
+    original_header = load_pcd_header(filename, binary=True)
     for k, v in header.items():
         original_header[k] = v
 
     # Update file with header
-    replace_file_header(filename, original_header, binary=True)
+    replace_pcd_file_header(filename, original_header, binary=True)
 
 
 def write_open3d(cloud, header, filename):
+    path = Path(filename)
+    file_format = path.suffix
+
     # Write cloud to file
     o3d.io.write_point_cloud(filename, cloud.to_legacy())
 
     # Update header
-    original_header = load_header(filename, binary=True)
+    original_header = load_header(filename, file_format, binary=True)
     for k, v in header.items():
         original_header[k] = v
 
@@ -39,8 +47,19 @@ def write_open3d(cloud, header, filename):
     replace_file_header(filename, original_header, binary=True)
 
 
-def load_header(filename, binary=True):
-    header = {}
+def load_header(filename, file_format, binary=True):
+    if file_format == ".pcd":
+        header = load_pcd_header(filename, binary=binary)
+    elif file_format == ".ply":
+        header = load_ply_header(filename, binary=binary)
+    else:
+        raise ValueError(f"Format {file_format} not suported")
+    return header
+
+
+def load_pcd_header(filename, binary=True):
+    header = {"format": ".pcd"}
+
     open_mode = "rb" if binary else "r"
     with open(filename, open_mode) as f:
         while True:
@@ -75,18 +94,33 @@ def load_header(filename, binary=True):
     return header
 
 
+def load_ply_header(filename, binary=True):
+    raise NotImplementedError("load_ply_header")
+
+
 def replace_file_header(filename, header, binary=True):
-    if binary:
-        replace_file_header_binary(filename, header)
+    file_format = header["format"]
+
+    if file_format == ".pcd":
+        replace_pcd_file_header(filename, header, binary=binary)
+    elif file_format == ".ply":
+        replace_ply_file_header(filename, header, binary=binary)
     else:
-        replace_file_header_normal(filename, header)
+        raise ValueError(f"Format {file_format} not suported")
 
 
-def replace_file_header_normal(filename, header):
-    pass
+def replace_pcd_file_header(filename, header, binary=True):
+    if binary:
+        replace_pcd_file_header_binary(filename, header)
+    else:
+        replace_pcd_file_header_normal(filename, header)
 
 
-def replace_file_header_binary(filename, header):
+def replace_pcd_file_header_normal(filename, header):
+    raise NotImplementedError()
+
+
+def replace_pcd_file_header_binary(filename, header):
     encoding = "utf-8"
     with fileinput.FileInput(filename, inplace=True, mode="rb") as f:
         for line in f:
@@ -123,3 +157,7 @@ def replace_file_header_binary(filename, header):
 
             # Write to standard output
             sys.stdout.write(line)
+
+
+def replace_ply_file_header(filename, header, binary=True):
+    raise NotImplementedError()

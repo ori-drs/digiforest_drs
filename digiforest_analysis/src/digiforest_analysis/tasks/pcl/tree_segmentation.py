@@ -18,7 +18,6 @@ class TreeSegmentation(BaseTask):
             "min_gravity_alignment_score", 0.7
         )
         self._max_trunk_height = kwargs.get("max_trunk_height", 5.0)
-        self._debug = kwargs.get("debug", False)
 
     def _process(self, **kwargs):
         """ "
@@ -32,7 +31,7 @@ class TreeSegmentation(BaseTask):
 
         # extract clusters
         clusters = self.extract_clusters(cloud)
-        if self._debug:
+        if self._debug_level > 0:
             print("Extracted " + str(len(clusters)) + " initial clusters.")
 
         # filter out implausible clusters
@@ -42,7 +41,7 @@ class TreeSegmentation(BaseTask):
             cluster_info = self.compute_cluster_info(tree)
             trees_info.append(cluster_info)
 
-        if self._debug:
+        if self._debug_level > 0:
             num_filtered_clusters = len(clusters) - len(tree_clouds)
             print("Filtered out " + str(num_filtered_clusters) + " clusters.")
         return tree_clouds, trees_info
@@ -163,7 +162,7 @@ class TreeSegmentation(BaseTask):
             cluster_dim["min_z"], cluster_dim["min_z"] + self._max_trunk_height
         )
         cloud_filtered = passthrough.filter()
-        if self._debug:
+        if self._debug_level > 0:
             print(
                 "DBH: Passthrough filter let "
                 + str(cloud_filtered.size)
@@ -174,7 +173,7 @@ class TreeSegmentation(BaseTask):
         # cloud_filtered = cloud
         if cloud_filtered.size < 10:
             dbh = 0
-            if self._debug:
+            if self._debug_level > 0:
                 print("DBH Insufficient points for fitting a cylinder")
             return dbh
 
@@ -245,7 +244,7 @@ if __name__ == "__main__":
             max_trunk_height=5.0,
             max_tree_diameter=2.5,
             min_gravity_alignment_score=0.0,
-            debug=True,
+            debug_level=1,
         )
         tree_clouds, trees_info = app.process(cloud=cloud)
 

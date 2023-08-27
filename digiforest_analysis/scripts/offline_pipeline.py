@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 from digiforest_analysis.pipeline import Pipeline
-from digiforest_analysis.utils import pcd
 from pathlib import Path
 
 import argparse
-import os
-
+import matplotlib.pyplot as plt
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -17,45 +15,54 @@ if __name__ == "__main__":
     parser.add_argument("--out", default=None)
     args = parser.parse_args()
 
-    # Check validity of input
-    filename = Path(args.filename)
-    if not filename.exists():
-        raise ValueError(f"Input file [{filename}] does not exist")
-
-    # Read cloud
-    cloud, header = pcd.load(str(filename), binary=True)
-    assert len(cloud.point.normals) > 0
+    # Default config
+    params = {
+        "ground_segmentation": {
+            "debug_level": 2,  # 0: none, 1: messages, 2: 3d visualizations
+            "voxel_filter_size": 0.05,
+            "max_distance_to_plane": 0.5,
+            "cell_size": 4.0,
+            "normal_thr": 0.9,
+            "box_size": 80,
+        },
+        "tree_segmentation": {
+            "debug_level": 2,
+            "normal_thr": 0.5,
+            "voxel_size": 0.05,
+            "cluster_2d": False,
+            "clustering_method": "hdbscan",
+            "min_tree_height": 1.5,
+            "max_tree_diameter": 10.0,
+            "min_tree_diameter": 0.1,
+            "min_gravity_alignment_score": 0.1,
+        },
+        "tree_analysis": {
+            "debug_level": 2,
+            "fitting_method": "pcl",
+            "breast_height": 1.3,
+            "breast_height_range": 1.5,
+            "max_valid_radius": 0.5,
+            "min_inliers": 4,
+        },
+    }
 
     # Configure pipeline
-    pipeline = Pipeline()
+    pipeline = Pipeline(file=args.filename, out_dir=args.out, **params)
 
     # Process cloud
-    report = pipeline.process(cloud=cloud)
+    print("Processing...")
+    report = pipeline.process()
+
+    # Plot marteloscope
+    from digiforest_analysis.utils import marteloscope
+
+    fig, ax = plt.subplots()
+    marteloscope.plot(pipeline.trees, ax)
+    marteloscope_path = Path(args.out, "marteloscope.pdf")
+    fig.set_tight_layout(True)
+    fig.savefig(str(marteloscope_path), dpi=150)
 
     # Extract report
-    print(f"\nPipeline report: \n{report}")
-
-    # Prepare output folders
-    if args.out is not None:
-        out_dir = Path(args.out)
-    else:
-        out_dir = filename.parent
-    out_dir.mkdir(exist_ok=True)
-
-    # Prepare header fix
-    header_fix = {"VIEWPOINT": header["VIEWPOINT"]}
-
-    # Save ground
-    ground = pipeline.ground
-    pcd.write(ground, header_fix, os.path.join(out_dir, "ground_cloud.pcd"))
-
-    # Save forest cloud
-    forest = pipeline.forest
-    pcd.write(forest, header_fix, os.path.join(out_dir, "forest_cloud.pcd"))
-
-    # Get trees
-    trees = pipeline.trees
-    for t in trees:
-        pcd.write_open3d(
-            t["cloud"], header_fix, os.path.join(out_dir, f"tree_{t['id']}.pcd")
-        )
+    print("\nPipeline report:")
+    for k, v in report.items():
+        print(f"{k:<20}: {v}")

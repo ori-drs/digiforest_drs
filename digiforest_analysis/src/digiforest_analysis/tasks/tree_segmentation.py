@@ -1,4 +1,5 @@
 from digiforest_analysis.tasks import BaseTask
+from digiforest_analysis.utils import clustering
 
 import open3d as o3d
 import numpy as np
@@ -11,7 +12,7 @@ class TreeSegmentation(BaseTask):
         self._rejected_clusters = []
 
         self._normal_thr = kwargs.get("normal_thr", 0.5)
-        self._voxel_size = kwargs.get("voxel_size", 0.1)
+        self._voxel_size = kwargs.get("voxel_size", 0.05)
         self._cluster_2d = kwargs.get("cluster_2d", False)
         self._clustering_method = kwargs.get("clustering_method", "hdbscan")
 
@@ -37,8 +38,8 @@ class TreeSegmentation(BaseTask):
         cloud = self.prefiltering(cloud)
 
         # Extract clusters
-        clusters = self.coarse_clustering(cloud, self._clustering_method)
-        if self._debug:
+        clusters = self.clustering(cloud, self._clustering_method)
+        if self._debug_level > 0:
             print("Extracted " + str(len(clusters)) + " initial clusters.")
 
         # Compute cluster attributes
@@ -47,9 +48,13 @@ class TreeSegmentation(BaseTask):
         # Filter out implausible clusters
         filtered_clusters = self.filter_tree_clusters(clusters)
 
-        if self._debug:
+        if self._debug_level > 0:
             num_filtered_clusters = len(clusters) - len(filtered_clusters)
             print(f"Filtered out {num_filtered_clusters} clusters.")
+
+        # Debug visualizations
+        if self._debug_level > 1:
+            self.debug_visualizations(cloud, filtered_clusters)
 
         return filtered_clusters
 
@@ -69,50 +74,9 @@ class TreeSegmentation(BaseTask):
 
         return new_cloud
 
-    def coarse_clustering(self, cloud, method="dbscan_o3d"):
-        if self._cluster_2d:
-            points = cloud.point.positions.numpy()[:, :2]
-        else:
-            points = cloud.point.positions.numpy()
-
-        if method == "dbscan_o3d":
-            eps = 0.8
-            min_cluster_size = 20
-            labels = cloud.cluster_dbscan(
-                eps=eps, min_points=min_cluster_size, print_progress=False
-            ).numpy()
-
-        elif method == "dbscan_sk":
-            from sklearn.cluster import DBSCAN
-
-            eps = 0.3
-            min_cluster_size = 20
-            db = DBSCAN(eps=eps, min_samples=min_cluster_size).fit(points)
-            labels = db.labels_
-
-        elif method == "hdbscan_sk":
-            from sklearn.cluster import HDBSCAN
-
-            min_cluster_size = 20
-            db = HDBSCAN(min_samples=min_cluster_size).fit(points)
-            labels = db.labels_
-
-        elif method == "hdbscan":
-            import hdbscan
-
-            clusterer = hdbscan.HDBSCAN(
-                min_cluster_size=20, algorithm="best", core_dist_n_jobs=1
-            )
-            labels = clusterer.fit_predict(points)
-
-        elif method == "kmeans":
-            from sklearn.cluster import KMeans
-
-            num_clusters = 350
-            labels = KMeans(n_clusters=num_clusters, n_init="auto").fit_predict(points)
-
-        else:
-            raise NotImplementedError(f"Method [{method}] not available")
+    def clustering(self, cloud, method="dbscan_open3d"):
+        # Run clustering
+        labels = clustering.cluster(cloud, method=method)
 
         # Get max number of labels
         num_labels = labels.max() + 1
@@ -129,7 +93,7 @@ class TreeSegmentation(BaseTask):
     def filter_tree_clusters(self, clusters):
         filtered_clusters = []
         self._rejected_clusters = []
-        for i, cluster in enumerate(clusters):
+        for cluster in clusters:
             valid_alignment = self.check_cluster_alignment(cluster)
             valid_height = self.check_cluster_height(cluster)
             valid_size = self.check_cluster_size(cluster)
@@ -145,6 +109,17 @@ class TreeSegmentation(BaseTask):
                     cluster["cloud"].paint_uniform_color([0.0, 0.0, 1.0])
                 self._rejected_clusters.append(cluster)
 
+            if self._debug_level > 2:
+                bbox = cluster["cloud"].get_axis_aligned_bounding_box()
+                bbox.set_color([0.0, 0.0, 0.0])
+                o3d.visualization.draw_geometries(
+                    [
+                        cluster["cloud"].to_legacy(),
+                        bbox.to_legacy(),
+                    ],
+                    window_name=f"Cluster {cluster['info']['id'] }",
+                )
+
         return filtered_clusters
 
     def check_cluster_alignment(self, cluster):
@@ -153,18 +128,18 @@ class TreeSegmentation(BaseTask):
         alignment_score = np.abs(np.dot(cluster_principal_axis, gravity_axis))
         if alignment_score >= self._min_gravity_alignment_score:
             return True
-        if self._debug:
+        if self._debug_level > 0:
             print(
-                f"Cluster {cluster['id']}. Invalid alignment: {alignment_score:.2f} < {self._min_gravity_alignment_score:.2f}"
+                f"Cluster {cluster['info']['id']}. Invalid alignment: {alignment_score:.2f} < {self._min_gravity_alignment_score:.2f}"
             )
         return False
 
     def check_cluster_height(self, cluster):
         if cluster["info"]["size_z"] >= self._min_tree_height:
             return True
-        if self._debug:
+        if self._debug_level > 0:
             print(
-                f"Cluster {cluster['id']}. Invalid height: {cluster['info']['size_z'] } < {self._min_tree_height} "
+                f"Cluster {cluster['info']['id']}. Invalid height: {cluster['info']['size_z']:.2f} < {self._min_tree_height} "
             )
         return False
 
@@ -175,22 +150,22 @@ class TreeSegmentation(BaseTask):
         x_min_valid = cluster["info"]["size_x"] > self._min_tree_diameter
         y_min_valid = cluster["info"]["size_y"] > self._min_tree_diameter
 
-        if self._debug:
+        if self._debug_level > 0:
             if not x_max_valid:
                 print(
-                    f"Cluster {cluster['id']}. Invalid x_size: {cluster['info']['size_x']:.2f} > {self._max_tree_diameter:.2f}"
+                    f"Cluster {cluster['info']['id']}. Invalid x_size: {cluster['info']['size_x']:.2f} > {self._max_tree_diameter:.2f}"
                 )
             if not y_max_valid:
                 print(
-                    f"Cluster {cluster['id']}. Invalid y_size: {cluster['info']['size_y']:.2f} > {self._max_tree_diameter:.2f}"
+                    f"Cluster {cluster['info']['id']}. Invalid y_size: {cluster['info']['size_y']:.2f} > {self._max_tree_diameter:.2f}"
                 )
             if not x_min_valid:
                 print(
-                    f"Cluster {cluster['id']}. Invalid x_size: {cluster['info']['size_x']:.2f} < {self._min_tree_diameter:.2f}"
+                    f"Cluster {cluster['info']['id']}. Invalid x_size: {cluster['info']['size_x']:.2f} < {self._min_tree_diameter:.2f}"
                 )
             if not y_min_valid:
                 print(
-                    f"Cluster {cluster['id']}. Invalid y_size: {cluster['info']['size_y']:.2f} < {self._min_tree_diameter:.2f}"
+                    f"Cluster {cluster['info']['id']}. Invalid y_size: {cluster['info']['size_y']:.2f} < {self._min_tree_diameter:.2f}"
                 )
 
         return x_max_valid and y_max_valid and x_min_valid and y_min_valid
@@ -243,14 +218,55 @@ class TreeSegmentation(BaseTask):
 
         return clusters
 
+    def debug_visualizations(self, cloud, clusters):
+        import matplotlib.pyplot as plt
+
+        cmap = plt.get_cmap("tab20")
+
+        # Visualize clouds
+        viz_clouds = []
+
+        cloud_copy = cloud.clone()
+        cloud_copy.paint_uniform_color([0.7, 0.7, 0.7])
+        viz_clouds.append(cloud_copy.to_legacy())
+
+        for c in clusters:
+            i = c["info"]["id"]
+            color = cmap(i % 20)[:3]
+
+            tree_cloud = c["cloud"].clone()
+            tree_cloud.paint_uniform_color(color)
+            viz_clouds.append(tree_cloud.to_legacy())
+
+            bbox = tree_cloud.get_axis_aligned_bounding_box()
+            bbox.set_color(color)
+            viz_clouds.append(bbox.to_legacy())
+
+        for i, t in enumerate(self.rejected_clusters):
+            color = [0.1, 0.1, 0.1]
+            tree_cloud = t["cloud"].clone()
+            viz_clouds.append(tree_cloud.to_legacy())
+
+            bbox = tree_cloud.get_axis_aligned_bounding_box()
+            bbox.set_color(color)
+            viz_clouds.append(bbox.to_legacy())
+
+        o3d.visualization.draw_geometries(
+            viz_clouds,
+            zoom=0.5,
+            front=[0.79, 0.02, 0.60],
+            lookat=[2.61, 2.04, 1.53],
+            up=[-0.60, -0.012, 0.79],
+            window_name="tree_segmentation",
+        )
+
 
 if __name__ == "__main__":
     """Minimal example"""
     import os
     import sys
     import yaml
-    import matplotlib.pyplot as plt
-    from digiforest_analysis.utils import pcd
+    from digiforest_analysis.utils import io
 
     print("Tree segmentation")
     if len(sys.argv) != 3:
@@ -261,73 +277,33 @@ if __name__ == "__main__":
         if extension != ".pcd":
             sys.exit("Input file must be a pcd file")
 
-    cloud, header = pcd.load(sys.argv[1], binary=True)
+    cloud, header = io.load(sys.argv[1], binary=True)
     assert len(cloud.point.normals) > 0
 
     print("Processing", sys.argv[1])
 
     app = TreeSegmentation(
-        debug=False,
+        debug_level=1, cluster_2d=False, clustering_method="euclidean_pcl"
     )
     trees = app.process(cloud=cloud)
-
-    # Visualize clouds
-    n_points = len(cloud.point.positions)
-    cloud.paint_uniform_color([0.9, 0.9, 0.9])
-
-    viz_clouds = []
-    # viz_clouds.append(cloud.to_legacy())
-
-    n_trees = len(trees)
-    cmap = plt.get_cmap("tab20")
-    for i, t in enumerate(trees):
-        color = cmap(i % 20)[:3]
-
-        tree_cloud = t["cloud"]
-        tree_cloud.paint_uniform_color(color)
-        viz_clouds.append(tree_cloud.to_legacy())
-
-        bbox = tree_cloud.get_axis_aligned_bounding_box()
-        bbox.set_color(color)
-        viz_clouds.append(bbox.to_legacy())
-
-    for i, t in enumerate(app.rejected_clusters):
-        color = [0.1, 0.1, 0.1]
-        tree_cloud = t["cloud"]
-        viz_clouds.append(tree_cloud.to_legacy())
-
-        bbox = tree_cloud.get_axis_aligned_bounding_box()
-        bbox.set_color(color)
-        viz_clouds.append(bbox.to_legacy())
-
-    # viewer = o3d.visualization.Visualizer()
-    # viewer.create_window()
-    # for g in viz_clouds:
-    #     viewer.add_geometry(g)
-    # opt = viewer.get_render_option()
-    # opt.show_coordinate_frame = True
-    # opt.background_color = np.asarray([1.0, 1.0, 1.0])
-    # viewer.run()
-    # viewer.destroy_window()
-
-    o3d.visualization.draw_geometries(
-        viz_clouds,
-        zoom=0.5,
-        front=[0.79, 0.02, 0.60],
-        lookat=[2.61, 2.04, 1.53],
-        up=[-0.60, -0.012, 0.79],
-    )
 
     # Write output
     for tree in trees:
         # Write clouds
         i = tree["info"]["id"]
 
+        # Tree height normalize
+        tree_cloud = tree["cloud"]
+
+        # shift to zero (debugging)
+        # z_shift = cloud.point.positions[:, 2].min()
+        # cloud.point.positions[:, 2] = cloud.point.positions[:, 2] - z_shift
+
         # Write cloud
         tree_name = f"tree_cloud_{i:04}.pcd"
         tree_cloud_filename = os.path.join(sys.argv[2], tree_name)
         header_fix = {"VIEWPOINT": header["VIEWPOINT"]}
-        pcd.write(tree["cloud"], header_fix, tree_cloud_filename)
+        io.write(tree_cloud, header_fix, tree_cloud_filename)
 
         # Write tree info
         tree_name = f"tree_info_{i:04}.yaml"

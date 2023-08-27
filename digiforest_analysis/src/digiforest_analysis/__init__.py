@@ -5,5 +5,5 @@ from .tasks import (
     tree_analysis,
     tree_segmentation,
 )
-from .utils import timing, plotting
+from .utils import timing, plotting, io, cylinder, marteloscope
 from .pipeline import Pipeline
