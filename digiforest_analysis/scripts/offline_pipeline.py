@@ -18,6 +18,7 @@ if __name__ == "__main__":
     # Default config
     params = {
         "ground_segmentation": {
+            "method": "default",  # default, indexing, csf
             "debug_level": 2,  # 0: none, 1: messages, 2: 3d visualizations
             "voxel_filter_size": 0.05,
             "max_distance_to_plane": 0.5,
@@ -30,7 +31,7 @@ if __name__ == "__main__":
             "normal_thr": 0.5,
             "voxel_size": 0.05,
             "cluster_2d": False,
-            "clustering_method": "hdbscan",
+            "clustering_method": "hdbscan",  # many options, check clustering.py
             "min_tree_height": 1.5,
             "max_tree_diameter": 10.0,
             "min_tree_diameter": 0.1,
@@ -38,7 +39,7 @@ if __name__ == "__main__":
         },
         "tree_analysis": {
             "debug_level": 2,
-            "fitting_method": "pcl",
+            "fitting_method": "pcl_ransac",  # pcl_ransac, lsq
             "breast_height": 1.3,
             "breast_height_range": 1.5,
             "max_valid_radius": 0.5,

@@ -8,6 +8,7 @@ class GroundSegmentation(BaseTask):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
+        self._method = kwargs.get("method", "default")
         self._voxel_filter_size = kwargs.get("voxel_filter_size", 0.05)
         self._max_distance_to_plane = kwargs.get("max_distance_to_plane", 0.5)
         self._cell_size = kwargs.get("cell_size", 4.0)
@@ -22,13 +23,12 @@ class GroundSegmentation(BaseTask):
             _type_: _description_
         """
         cloud = kwargs.get("cloud")
-        method = kwargs.get("method", "default")
 
-        if method == "default":
+        if self._method == "default":
             ground_cloud, forest_cloud = self.run_default(cloud)
-        elif method == "indexing":
+        elif self._method == "indexing":
             ground_cloud, forest_cloud = self.run_indexing(cloud)
-        elif method == "csf":
+        elif self._method == "csf":
             ground_cloud, forest_cloud = self.run_csf(cloud)
 
         # Debug visualizations
@@ -82,7 +82,7 @@ class GroundSegmentation(BaseTask):
         for xx in d_x:
             for yy in d_y:
                 # Crop the cloud
-                cropped_cloud = crop_box(cloud, (xx, yy), self._cell_size)
+                cropped_cloud = crop_box(coarse_ground_cloud, (xx, yy), self._cell_size)
 
                 # Check if there are enough points
                 if len(cropped_cloud.point.positions) > 100:
@@ -231,7 +231,7 @@ if __name__ == "__main__":
         debug_level=0,
     )
 
-    ground_cloud, forest_cloud = app.process(cloud=cloud, method="default")
+    ground_cloud, forest_cloud = app.process(cloud=cloud)
 
     # Write clouds
     header_fix = {"VIEWPOINT": header["VIEWPOINT"]}

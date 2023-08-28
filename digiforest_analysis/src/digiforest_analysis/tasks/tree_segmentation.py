@@ -38,7 +38,7 @@ class TreeSegmentation(BaseTask):
         cloud = self.prefiltering(cloud)
 
         # Extract clusters
-        clusters = self.clustering(cloud, self._clustering_method)
+        clusters = self.clustering(cloud)
         if self._debug_level > 0:
             print("Extracted " + str(len(clusters)) + " initial clusters.")
 
@@ -74,9 +74,11 @@ class TreeSegmentation(BaseTask):
 
         return new_cloud
 
-    def clustering(self, cloud, method="dbscan_open3d"):
+    def clustering(self, cloud):
         # Run clustering
-        labels = clustering.cluster(cloud, method=method)
+        labels = clustering.cluster(
+            cloud, method=self._clustering_method, cluster_2d=self._cluster_2d
+        )
 
         # Get max number of labels
         num_labels = labels.max() + 1

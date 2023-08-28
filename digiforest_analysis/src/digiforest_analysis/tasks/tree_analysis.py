@@ -8,7 +8,7 @@ class TreeAnalysis(BaseTask):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        self._fitting_method = kwargs.get("fitting_method", "pcl")
+        self._fitting_method = kwargs.get("fitting_method", "pcl_ransac")
         self._breast_height = kwargs.get("breast_height", 1.3)
         self._breast_height_range = kwargs.get("breast_height_range", 0.5)
         self._max_valid_radius = kwargs.get("max_valid_radius", 0.5)
@@ -62,20 +62,18 @@ class TreeAnalysis(BaseTask):
                 )
             return False, {}
 
-        points = cloud_filtered.point.positions.numpy().copy()
-        normals = cloud_filtered.point.normals.numpy().copy()
+        # Fit
+        points = cloud_filtered.point.positions.numpy()
+        normals = cloud_filtered.point.normals.numpy()
+        model = cylinder.fit(
+            points,
+            method=self._fitting_method,
+            N=normals,
+            outlier_thr=0.1,
+            min_inliers=self._min_inliers,
+        )
 
-        if self._fitting_method == "opt":
-            model = cylinder.fit(
-                points, N=normals, outlier_thr=0.1, min_inliers=self._min_inliers
-            )
-        elif self._fitting_method == "pcl":
-            model = cylinder.fit_pcl(
-                points, N=normals, outlier_thr=0.01, min_inliers=self._min_inliers
-            )
-        else:
-            raise ValueError(f"Fitting method [{self._fitting_method}] not valid")
-
+        # Debug
         if self._debug_level > 2:
             cylinder_mesh = cylinder.to_mesh(model)
             cloud.paint_uniform_color([1.0, 0.0, 0.0])
