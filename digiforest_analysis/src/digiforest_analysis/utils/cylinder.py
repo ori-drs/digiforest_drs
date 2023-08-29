@@ -7,6 +7,15 @@ from scipy.spatial.transform import Rotation as R
 from scipy.optimize import Bounds, minimize
 
 
+def cylinder_equation(X, c, w, r):
+    X = X[:, :, None]
+    c = c.reshape(3, 1)
+    w = w.reshape(3, 1)
+    return (
+        (c - X).transpose([0, 2, 1]) @ (np.eye(3) - w @ w.T) @ (c - X) - r**2
+    ).flatten()
+
+
 def fit(X, method="lsq", **kwargs):
     # Get arguments
     min_inliers = kwargs.get("min_inliers", 10)
@@ -25,7 +34,7 @@ def fit(X, method="lsq", **kwargs):
     cx, cy, cz, wx, wy, wz, r = params
 
     # Get position
-    c = np.array([cx, cy, cz]).reshape(3, 1)
+    c = np.array([cx, cy, cz])
 
     # Get rotation
     w = np.array([wx, wy, wz])
@@ -38,13 +47,13 @@ def fit(X, method="lsq", **kwargs):
     rotation = R.from_rotvec(axis_angle).as_matrix()
 
     # Compute height
-    height = 1.0
+    height = 0.0
     if inliers.shape[0] > min_inliers:
         # Rotate points to canonical frame
         # import matplotlib.pyplot as plt
         # ax = plt.figure().add_subplot(projection='3d')
         # ax.scatter(X[:,0], X[:,1], X[:,2])
-        X2 = rotation.T @ (X[inliers].reshape(-1, 3, 1) - c)
+        X2 = (rotation.T @ (X[inliers] - c).T).T
         # ax.scatter(X2[:, 0], X2[:, 1], X2[:, 2])
         # plt.show()
         lowest_point = X2[:, 2].min()
@@ -59,6 +68,7 @@ def fit(X, method="lsq", **kwargs):
         "success": inliers.shape[0] > min_inliers,
         "position": c,
         "rotation": rotation,
+        "axis": w,
         "radius": r,
         "inliers": inliers,
         "height": height,
@@ -78,12 +88,18 @@ def fit_ls(X, **kwargs):
     wy = kwargs.get("wy", 0.0)
     wz = kwargs.get("wz", 1.0)
     r = kwargs.get("r", 10)
+
+    weight_n = kwargs.get("weight_n", 0.0)  # Normals cost weight
+    weight_g = kwargs.get("weight_g", 0.0)  # Gravit cost weight
+
     outlier_thr = kwargs.get("outlier_thr", 0.01)
 
     # Prepare input data
     X = X[:, :, None].copy()
     X_mean = X.mean(axis=0)
     X -= X_mean
+
+    # Set initial parameters
     p = np.array([cx, cy, cz, wx, wy, wz, r])
 
     if N is not None:
@@ -112,7 +128,11 @@ def fit_ls(X, **kwargs):
 
     def residual(p):
         return np.vstack(
-            (residual_cylinder(p), residual_normals(p), residual_gravity(p))
+            (
+                residual_cylinder(p),
+                weight_n * residual_normals(p),
+                weight_g * residual_gravity(p),
+            )
         ).reshape(-1, 3)
 
     def chi2(p):
@@ -120,9 +140,9 @@ def fit_ls(X, **kwargs):
 
     def cost(p):
         return (
-            loss.geman_mcclure(residual_cylinder(p))
-            + 1.0 * loss.geman_mcclure(residual_normals(p))
-            + 0.0 * loss.geman_mcclure(residual_gravity(p))
+            loss.smooth_l1(residual_cylinder(p))
+            + weight_n * loss.l2(residual_normals(p))
+            + weight_g * loss.l2(residual_gravity(p))
         ).sum()
 
     # Prepare bounds
@@ -134,7 +154,7 @@ def fit_ls(X, **kwargs):
 
     # Optimize
     # result = least_squares(residual_cylinder, p, loss="soft_l1", bounds=bounds)
-    result = minimize(cost, p, bounds=bounds)
+    result = minimize(cost, p, bounds=bounds, options={"gtol": 1e-6})
 
     # Get inliers
     # inliers = np.where(np.abs(result["fun"]) < outlier_thr)[0]
@@ -204,41 +224,49 @@ def to_mesh(model):
     return mesh
 
 
+def generate_test_cloud(
+    radius,
+    height,
+    num_points,
+    position=np.array([0, 0, 0]),
+    rotation=np.eye(3),
+    noise_std=0.0,
+    noise_perc=0.3,
+):
+    theta = np.linspace(0, 2 * np.pi, num_points)
+    z = np.linspace(0, height, num_points)
+    theta, z = np.meshgrid(theta, z)
+    x = radius * np.cos(theta)
+    y = radius * np.sin(theta)
+    points = np.stack((x.flatten(), y.flatten(), z.flatten())).transpose()
+
+    # Add noise
+    n_points = points.shape[0]
+    idxs = np.arange(n_points)
+    np.random.shuffle(idxs)
+    n_noisy = int(n_points * noise_perc)
+    idx_noisy = idxs[0:n_noisy]
+    points[idx_noisy, :] += np.random.normal(0, noise_std, (n_noisy, 3))
+
+    # Transform
+    points = rotation @ points.reshape(-1, 3, 1)
+    points = points + position
+    points = points.reshape(-1, 3)
+
+    # Create cloud
+    cloud = o3d.t.geometry.PointCloud(points)
+    cloud.estimate_normals()
+    cloud.paint_uniform_color([0.0, 0.0, 0.0])
+
+    return cloud
+
+
 if __name__ == "__main__":
     """Minimal example"""
     random.seed(42)
 
-    def generate_cylinder_points(
-        radius,
-        height,
-        num_points,
-        position=np.array([0, 0, 0]),
-        rotation=np.eye(3),
-        noise_std=0.0,
-        noise_perc=0.3,
-    ):
-        theta = np.linspace(0, 2 * np.pi, num_points)
-        z = np.linspace(0, height, num_points)
-        theta, z = np.meshgrid(theta, z)
-        x = radius * np.cos(theta)
-        y = radius * np.sin(theta)
-        points = np.stack((x.flatten(), y.flatten(), z.flatten())).transpose()
-
-        # Add noise
-        n_points = points.shape[0]
-        idxs = np.arange(n_points)
-        np.random.shuffle(idxs)
-        n_noisy = int(n_points * noise_perc)
-        idx_noisy = idxs[0:n_noisy]
-        points[idx_noisy, :] += np.random.normal(0, noise_std, (n_noisy, 3))
-
-        # Transform
-        points = rotation @ points.reshape(-1, 3, 1)
-        points = points + position
-        return points.reshape(-1, 3)
-
     # Create cylinder
-    points = generate_cylinder_points(
+    cloud = generate_test_cloud(
         radius=0.3,
         height=1.0,
         num_points=100,
@@ -247,8 +275,6 @@ if __name__ == "__main__":
         noise_std=0.0,
         noise_perc=0.2,
     )
-    cloud = o3d.t.geometry.PointCloud(points)
-    cloud.estimate_normals()
 
     origin = o3d.geometry.TriangleMesh.create_coordinate_frame()
 
@@ -258,7 +284,7 @@ if __name__ == "__main__":
 
     model = fit(X, method="lsq", N=N)
     if model["success"]:
-        print(f"Inliers: {model['inliers'].shape[0]} / {points.shape[0]}")
+        print(f"Inliers: {model['inliers'].shape[0]} / {X.shape[0]}")
         print(f"height: {model['height']}")
         print(f"radius: {model['radius']}")
         # View cylinder
@@ -267,9 +293,9 @@ if __name__ == "__main__":
             [origin, cloud.to_legacy(), cylinder_mesh], window_name="lsq"
         )
 
-    model = fit_pcl(X)
+    model = fit(X, method="pcl_ransac")
     if model["success"]:
-        print(f"Inliers: {model['inliers'].shape[0]} / {points.shape[0]}")
+        print(f"Inliers: {model['inliers'].shape[0]} / {X.shape[0]}")
         print(f"height: {model['height']}")
         print(f"radius: {model['radius']}")
         # View cylinder
