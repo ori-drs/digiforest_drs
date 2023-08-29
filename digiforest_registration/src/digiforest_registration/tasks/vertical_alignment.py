@@ -1,4 +1,3 @@
-import open3d as o3d
 import numpy as np
 from digiforest_analysis.tasks import GroundSegmentation
 
@@ -42,16 +41,20 @@ class VerticalRegistration:
         norm = np.linalg.norm(n)
         n = n / np.linalg.norm(n)
 
+        # visualize the two ground planes
         inlier_cloud = ground.select_by_index(inliers)
         inlier_cloud.paint_uniform_color([1.0, 0, 0])
 
         inlier_cloud_r = ground_reference_cloud.select_by_index(inliers_r)
         inlier_cloud_r.paint_uniform_color([0, 1.0, 0])
 
-        o3d.visualization.draw_geometries(
-            [inlier_cloud.to_legacy(), inlier_cloud_r.to_legacy()]
-        )
+        # o3d.visualization.draw_geometries(
+        #     [inlier_cloud.to_legacy(), inlier_cloud_r.to_legacy()]
+        # )
+
+        # todo find rotation between the two normal vectors
 
         print([a_r, b_r, c_r, d_r], [a, b, c, d])
         print("dot product of normals: ", np.dot(n_r, n))
         print("Distance between planes: ", np.abs(d_r / norm_r - d / norm))
+        return [a_r, b_r, c_r, d_r], [a, b, c, d]
