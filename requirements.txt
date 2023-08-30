@@ -12,4 +12,4 @@ shapely
 pyyaml
 ipympl
 open3d>=0.17.0
-pyransac3d
+pytest

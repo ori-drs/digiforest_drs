@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 
 
-def plot(trees, ax, cmap="tab20", **kwargs):
+def plot(trees, ax, cmap="tab20b", **kwargs):
     from matplotlib.patches import Circle
 
     color_map = plt.get_cmap(cmap)
