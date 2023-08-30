@@ -6,6 +6,7 @@ class BaseTask:
     @abstractmethod
     def __init__(self, **kwargs):
         self._timer = Timer()
+        self._debug_level = kwargs.get("debug_level", 0)
 
     @abstractmethod
     def _process(self, **kwargs):

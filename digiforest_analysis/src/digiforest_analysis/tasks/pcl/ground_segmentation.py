@@ -15,7 +15,6 @@ class GroundSegmentation(BaseTask):
         self._cell_size = kwargs.get("cell_size", 4.0)
         self._normal_thr = kwargs.get("normal_thr", 0.95)
         self._cloud_boxsize = kwargs.get("box_size", 80)
-        self._debug = kwargs.get("debug", False)
 
     def _process(self, **kwargs):
         """ "
@@ -99,7 +98,6 @@ class GroundSegmentationPcl(BaseTask):
         self._cell_size = kwargs.get("cell_size", 4.0)
         self._normal_thr = kwargs.get("normal_thr", 0.95)
         self._cloud_boxsize = kwargs.get("box_size", 80)
-        self._debug = kwargs.get("debug", False)
 
     def _process(self, **kwargs):
         """
@@ -248,7 +246,7 @@ class GroundSegmentationPcl(BaseTask):
                         # plane fitting worked
                         # keep point that are close to the plane
                         points = pBox.to_array()
-                        if self._debug:
+                        if self._debug_level > 0:
                             print("plane found", len(indices))
                         dist = self.point_plane_distance(
                             coefficients[0],
@@ -269,7 +267,7 @@ if __name__ == "__main__":
     import pcl
     import os
     import sys
-    from digiforest_analysis.utils import pcd
+    from digiforest_analysis.utils import io
 
     print("PCL implementation")
     if len(sys.argv) != 3:
@@ -281,7 +279,7 @@ if __name__ == "__main__":
             sys.exit("Input file must be a pcd file")
 
         # Read header
-        header = pcd.load_header(sys.argv[1], binary=True)
+        header = io.load_header(sys.argv[1], binary=True)
 
     # PCL implementation
     cloud = pcl.PointCloud_PointNormal()
@@ -294,10 +292,10 @@ if __name__ == "__main__":
     )
     ground_cloud, forest_cloud = app.process(cloud=cloud)
     header_fix = {"VIEWPOINT": header["VIEWPOINT"]}
-    pcd.write_pcl(
+    io.write_pcl(
         ground_cloud, header_fix, os.path.join(sys.argv[2], "pcl_ground_cloud.pcd")
     )
-    pcd.write_pcl(
+    io.write_pcl(
         forest_cloud, header_fix, os.path.join(sys.argv[2], "pcl_forest_cloud.pcd")
     )
 
@@ -314,9 +312,9 @@ if __name__ == "__main__":
     )
     ground_cloud, forest_cloud = app.process(cloud=cloud)
     header_fix = {"VIEWPOINT": header["VIEWPOINT"]}
-    pcd.write_open3d(
+    io.write_open3d(
         ground_cloud, header_fix, os.path.join(sys.argv[2], "o3d_ground_cloud.pcd")
     )
-    pcd.write_open3d(
+    io.write_open3d(
         forest_cloud, header_fix, os.path.join(sys.argv[2], "o3d_forest_cloud.pcd")
     )

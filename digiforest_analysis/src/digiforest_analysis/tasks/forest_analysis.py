@@ -6,9 +6,17 @@ class ForestAnalysis(BaseTask):
         super().__init__(**kwargs)
 
     def _process(self, **kwargs):
+        forest = kwargs.get("forest")
         trees = kwargs.get("trees")
 
-        # Implement your code here
-        #
+        report = {}
 
-        return trees
+        # Get bounding box of forest
+        bbox_forest = forest.get_axis_aligned_bounding_box()
+        bbox_forest_dims = bbox_forest.get_extent()
+        report["area"] = (bbox_forest_dims[0] * bbox_forest_dims[1]).item()
+
+        # Number of trees
+        report["num_trees"] = len(trees)
+
+        return report
