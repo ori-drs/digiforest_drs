@@ -100,7 +100,7 @@ class TreeSegmentation(BaseTask):
             valid_height = self.check_cluster_height(cluster)
             valid_size = self.check_cluster_size(cluster)
 
-            if valid_alignment and valid_height and valid_size:
+            if True:  # valid_alignment and valid_height and valid_size:
                 filtered_clusters.append(cluster)
             else:
                 if not valid_alignment:
@@ -222,15 +222,16 @@ class TreeSegmentation(BaseTask):
 
     def debug_visualizations(self, cloud, clusters):
         import matplotlib.pyplot as plt
+        from digiforest_analysis.utils import visualization as viz
 
-        cmap = plt.get_cmap("tab20")
+        cmap = plt.get_cmap("tab20b")
 
         # Visualize clouds
         viz_clouds = []
 
-        cloud_copy = cloud.clone()
-        cloud_copy.paint_uniform_color([0.7, 0.7, 0.7])
-        viz_clouds.append(cloud_copy.to_legacy())
+        # cloud_copy = cloud.clone()
+        # cloud_copy.paint_uniform_color([0.7, 0.7, 0.7])
+        # viz_clouds.append(cloud_copy.to_legacy())
 
         for c in clusters:
             i = c["info"]["id"]
@@ -244,20 +245,27 @@ class TreeSegmentation(BaseTask):
             bbox.set_color(color)
             viz_clouds.append(bbox.to_legacy())
 
+            mesh = viz.bbox_to_mesh(bbox, depth=0.1, offset=[0, 0, -0.1], color=color)
+            viz_clouds.append(mesh)
+
         for i, t in enumerate(self.rejected_clusters):
             color = [0.1, 0.1, 0.1]
             tree_cloud = t["cloud"].clone()
+            tree_cloud.paint_uniform_color(color)
             viz_clouds.append(tree_cloud.to_legacy())
 
             bbox = tree_cloud.get_axis_aligned_bounding_box()
             bbox.set_color(color)
             viz_clouds.append(bbox.to_legacy())
 
+            mesh = viz.bbox_to_mesh(bbox, depth=0.1, offset=[0, 0, -0.1], color=color)
+            viz_clouds.append(mesh)
+
         o3d.visualization.draw_geometries(
             viz_clouds,
-            zoom=0.5,
+            zoom=0.7,
             front=[0.79, 0.02, 0.60],
-            lookat=[2.61, 2.04, 1.53],
+            lookat=cloud.get_center().numpy(),
             up=[-0.60, -0.012, 0.79],
             window_name="tree_segmentation",
         )
@@ -284,9 +292,7 @@ if __name__ == "__main__":
 
     print("Processing", sys.argv[1])
 
-    app = TreeSegmentation(
-        debug_level=1, cluster_2d=False, clustering_method="euclidean_pcl"
-    )
+    app = TreeSegmentation(debug_level=2, cluster_2d=True, clustering_method="hdbscan")
     trees = app.process(cloud=cloud)
 
     # Write output

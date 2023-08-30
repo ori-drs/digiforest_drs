@@ -121,6 +121,7 @@ class Pipeline:
             raise ValueError("'cloud or header empty'")
 
         # Extract the ground
+        print("Extracting ground...")
         self._ground_cloud, self._forest_cloud = self._ground_segmentation.process(
             cloud=self._cloud
         )
@@ -128,14 +129,19 @@ class Pipeline:
         self.save_cloud(self._forest_cloud, label="forest_cloud")
 
         # Extract the trees from the forest cloud
+        print("Segmenting trees...")
         self._trees = self._tree_segmentation.process(cloud=self._forest_cloud)
         self.save_trees(self._trees, label="segmented")
 
         # Get the specific attributes of each tree
-        self._trees = self._tree_analysis.process(trees=self._trees)
+        print("Analyzing trees...")
+        self._trees = self._tree_analysis.process(
+            trees=self._trees, ground_cloud=self._ground_cloud
+        )
         self.save_trees(self._trees, label="filtered")
 
         # Get general attributes from the full forest
+        print("Analyzing forest patch...")
         report = self._forest_analysis.process(
             forest=self._forest_cloud, trees=self._trees
         )
