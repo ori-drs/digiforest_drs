@@ -43,11 +43,12 @@ class VerticalRegistration:
 
         # visualize the two ground planes
         inlier_cloud = ground.select_by_index(inliers)
-        inlier_cloud.paint_uniform_color([1.0, 0, 0])
+        inlier_cloud.paint_uniform_color([0.8, 0.8, 0.8])
 
         inlier_cloud_r = ground_reference_cloud.select_by_index(inliers_r)
-        inlier_cloud_r.paint_uniform_color([0, 1.0, 0])
+        inlier_cloud_r.paint_uniform_color([1.0, 0.0, 0])
 
+        # import open3d as o3d
         # o3d.visualization.draw_geometries(
         #     [inlier_cloud.to_legacy(), inlier_cloud_r.to_legacy()]
         # )

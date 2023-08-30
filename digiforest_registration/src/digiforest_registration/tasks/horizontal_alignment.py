@@ -64,12 +64,81 @@ class HorizontalRegistration:
             image[y, x] = [max(v, image[y, x])]
             index += 1
 
-        cv2.imshow("Image", image)
+        # cv2.imshow("Image", image)
+        # cv2.waitKey(0)
+        # cv2.destroyAllWindows()
+        return image
+
+    def filter_image(self, image, name="image.png"):
+        grayscale_image = (image * 255).astype(np.uint8)
+
+        # Convert to binary image
+        # _, binary_image = cv2.threshold(grayscale_image, 1, 255, cv2.THRESH_BINARY)
+
+        return grayscale_image
+
+    def find_feature_matches(self, img1, img2):
+        # Initiate SIFT detector
+        orb = cv2.ORB_create()
+        # find the keypoints and descriptors with SIFT
+        kp1, des1 = orb.detectAndCompute(img1, None)
+        kp2, des2 = orb.detectAndCompute(img2, None)
+
+        # create BFMatcher object
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        # Match descriptors.
+        matches = bf.match(des1, des2)
+        # Sort them in the order of their distance.
+        matches = sorted(matches, key=lambda x: x.distance)
+        # Draw first 10 matches.
+        cv2.drawMatches(
+            img1,
+            kp1,
+            img2,
+            kp2,
+            matches[:10],
+            None,
+            flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
+        )
+
+        # cv2.imshow("Image", img3)
+        # cv2.waitKey(0)
+        # cv2.destroyAllWindows()
+
+    def find_local_maxima(self, img):
+        # the input image is a float image
+        # find local maxima in the image
+        kernel_size = (25, 25)
+        kernel = np.ones(kernel_size, np.uint8)
+        dilated_img = cv2.dilate(img, kernel)
+        mask = cv2.compare(
+            img, dilated_img, cv2.CMP_GE
+        )  # set mask to 255 where img >= mask
+
+        white_pixel_indices = np.where(mask == 255)
+        white_points_coordinates = list(
+            zip(white_pixel_indices[1], white_pixel_indices[0])
+        )
+        print(len(white_points_coordinates))
+
+        #
+        grayscale_image = (img * 255).astype(np.uint8)
+        maxima_img = cv2.cvtColor(grayscale_image, cv2.COLOR_GRAY2RGB)
+        for point in white_points_coordinates:
+            if grayscale_image[point[1], point[0]] > 0:
+                cv2.circle(maxima_img, point, 1, (0, 0, 255), -1)
+
+        cv2.imshow("Image", maxima_img)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 
-    def filter_image(self, image):
-        pass
-
     def process(self):
-        self.compute_canopy_image(self.reference_cloud, *self.reference_ground_plane)
+        reference_image = self.compute_canopy_image(
+            self.reference_cloud, *self.reference_ground_plane
+        )
+        # img1 = self.filter_image(reference_image, name="drone.png")
+        image = self.compute_canopy_image(self.cloud, *self.cloud_ground_plane)
+        # img2 = self.filter_image(image, name="frontier.png")
+
+        self.find_local_maxima(reference_image)
+        self.find_local_maxima(image)
