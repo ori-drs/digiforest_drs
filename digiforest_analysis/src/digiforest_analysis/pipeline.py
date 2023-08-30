@@ -87,19 +87,11 @@ class Pipeline:
 
     def save_cloud(self, cloud, label="default"):
         filename = Path(self._output_dir).joinpath(label + self._cloud_format)
-        if self._header is None:
-            header_fix = None
-        else:
-            header_fix = {"VIEWPOINT": self._header["VIEWPOINT"]}
-        io.write(cloud, header_fix, str(filename))
+        io.write(cloud, self._header, str(filename))
 
     def save_trees(self, trees, label="trees"):
         save_folder = Path(self._output_dir).joinpath(label)
         save_folder.mkdir(parents=True, exist_ok=True)
-        if self._header is None:
-            header_fix = None
-        else:
-            header_fix = {"VIEWPOINT": self._header["VIEWPOINT"]}
 
         for tree in trees:
             # Write clouds
@@ -110,7 +102,7 @@ class Pipeline:
             tree_cloud_filename = Path(
                 save_folder, f"tree_cloud_{i:04}{self._cloud_format}"
             )
-            io.write(tree_cloud, header_fix, str(tree_cloud_filename))
+            io.write(tree_cloud, self._header, str(tree_cloud_filename))
 
             # Write tree info
             tree_info_filename = Path(save_folder, f"tree_cloud_{i:04}.yaml")
