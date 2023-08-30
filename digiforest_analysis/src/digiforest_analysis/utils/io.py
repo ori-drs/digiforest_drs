@@ -3,12 +3,26 @@ from pathlib import Path
 import fileinput
 import open3d as o3d
 import sys
+import numpy as np
 
 
 def load(filename: str, binary=True):
     path = Path(filename)
     file_format = path.suffix
     cloud = o3d.t.io.read_point_cloud(str(path))
+
+    # if the coordinates of the cloud are too large,
+    # apply an offset to avoid numerical issues
+    threshold = 10**6
+    if len(cloud.point.positions) > 0:
+        point = cloud.point.positions[0].numpy().copy()
+        if (
+            (np.abs(point[0]) > threshold)
+            or (np.abs(point[1]) > threshold)
+            or (np.abs(point[2]) > threshold)
+        ):
+            cloud = cloud.translate(-point)
+
     header = load_header(filename, file_format, binary=binary)
 
     return cloud, header
@@ -39,12 +53,13 @@ def write_open3d(cloud, header, filename):
     o3d.io.write_point_cloud(filename, cloud.to_legacy())
 
     # Update header
-    original_header = load_header(filename, file_format, binary=True)
-    for k, v in header.items():
-        original_header[k] = v
+    if header is not None:
+        original_header = load_header(filename, file_format, binary=True)
+        for k, v in header.items():
+            original_header[k] = v
 
-    # Update file with header
-    replace_file_header(filename, original_header, binary=True)
+        # Update file with header
+        replace_file_header(filename, original_header, binary=True)
 
 
 def load_header(filename, file_format, binary=True):
@@ -95,7 +110,8 @@ def load_pcd_header(filename, binary=True):
 
 
 def load_ply_header(filename, binary=True):
-    raise NotImplementedError("load_ply_header")
+    return None
+    # raise NotImplementedError("load_ply_header")
 
 
 def replace_file_header(filename, header, binary=True):
