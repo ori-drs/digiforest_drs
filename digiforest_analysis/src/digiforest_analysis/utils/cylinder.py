@@ -22,7 +22,7 @@ def fit(X, method="lsq", **kwargs):
 
     # Fit
     if method == "lsq":
-        inliers, params = fit_ls(X, **kwargs)
+        inliers, params = fit_lsq(X, **kwargs)
 
     elif method == "pcl_ransac":
         inliers, params = fit_pcl(X, **kwargs)
@@ -59,9 +59,9 @@ def fit(X, method="lsq", **kwargs):
         lowest_point = X2[:, 2].min()
         highest_point = X2[:, 2].max()
         height = highest_point - lowest_point
-        # height_shift = np.array([0.0, 0.0, -lowest_point]).reshape(3, 1)
+        height_shift = np.array([0.0, 0.0, lowest_point + height / 2])
         # # Adjust center
-        # c = c - rotation @ height_shift
+        c = c + rotation @ height_shift
 
     # Parameters
     return {
@@ -75,7 +75,7 @@ def fit(X, method="lsq", **kwargs):
     }
 
 
-def fit_ls(X, **kwargs):
+def fit_lsq(X, **kwargs):
     """
     https://www.geometrictools.com/Documentation/LeastSquaresFitting.pdf
     """
@@ -93,10 +93,11 @@ def fit_ls(X, **kwargs):
     weight_g = kwargs.get("weight_g", 0.0)  # Gravit cost weight
 
     outlier_thr = kwargs.get("outlier_thr", 0.01)
+    scale = kwargs.get("loss_scale", 0.01)  # scale parameter
 
     # Prepare input data
     X = X[:, :, None].copy()
-    X_mean = X.mean(axis=0)
+    X_mean = np.median(X, axis=0)
     X -= X_mean
 
     # Set initial parameters
@@ -140,21 +141,38 @@ def fit_ls(X, **kwargs):
 
     def cost(p):
         return (
-            loss.smooth_l1(residual_cylinder(p))
+            loss.smooth_l1(residual_cylinder(p), c=scale)
             + weight_n * loss.l2(residual_normals(p))
             + weight_g * loss.l2(residual_gravity(p))
         ).sum()
 
     # Prepare bounds
     bounds = Bounds(
-        lb=[-np.inf, -np.inf, -np.inf, -1, -1, -1, 0.1],
-        ub=[np.inf, np.inf, np.inf, 1, 1, 1, np.inf],
+        lb=[-np.inf, -np.inf, -np.inf, -1, -1, 0.95, 0.01],
+        ub=[np.inf, np.inf, np.inf, 1, 1, 1.0, np.inf],
         keep_feasible=False,
     )
 
+    def gradient_respecting_bounds(bounds, fun, eps=1e-8):
+        """Adapted from https://stackoverflow.com/a/52220764"""
+
+        def gradient(x):
+            fx = fun(x)
+            grad = np.zeros(len(x))
+            for k in range(len(x)):
+                d = np.zeros(len(x))
+                d[k] = eps if x[k] + eps <= bounds.ub[k] else -eps
+                d[k] = eps if x[k] + eps >= bounds.lb[k] else -eps
+                grad[k] = (fun(x + d) - fx) / d[k]
+            return grad
+
+        return gradient
+
     # Optimize
     # result = least_squares(residual_cylinder, p, loss="soft_l1", bounds=bounds)
-    result = minimize(cost, p, bounds=bounds, options={"gtol": 1e-6})
+    result = minimize(
+        cost, p, bounds=bounds, jac=gradient_respecting_bounds(bounds, cost)
+    )
 
     # Get inliers
     # inliers = np.where(np.abs(result["fun"]) < outlier_thr)[0]
@@ -216,8 +234,9 @@ def to_mesh(model):
     assert "rotation" in model
     assert "radius" in model
 
-    mesh = o3d.geometry.TriangleMesh()
-    mesh = mesh.create_cylinder(radius=model["radius"], height=model["height"])
+    mesh = o3d.geometry.TriangleMesh.create_cylinder(
+        radius=model["radius"], height=model["height"]
+    )
     mesh.rotate(model["rotation"])
     mesh.translate(model["position"])
 

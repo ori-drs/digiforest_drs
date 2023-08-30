@@ -202,9 +202,9 @@ class GroundSegmentation(BaseTask):
 
         o3d.visualization.draw_geometries(
             [ground.to_legacy(), forest.to_legacy()],
-            zoom=0.5,
+            zoom=0.7,
             front=[0.79, 0.02, 0.60],
-            lookat=[2.61, 2.04, 1.53],
+            lookat=forest.get_center().numpy(),
             up=[-0.60, -0.012, 0.79],
             window_name="ground_segmentation",
         )

@@ -19,7 +19,7 @@ if __name__ == "__main__":
     params = {
         "ground_segmentation": {
             "method": "default",  # default, indexing, csf
-            "debug_level": 2,  # 0: none, 1: messages, 2: 3d visualizations
+            "debug_level": 2,  # 0: none, 1: messages, 2: 3d visualizations, 3: per-tree visualizations
             "voxel_filter_size": 0.05,
             "max_distance_to_plane": 0.5,
             "cell_size": 4.0,
@@ -27,7 +27,7 @@ if __name__ == "__main__":
             "box_size": 80,
         },
         "tree_segmentation": {
-            "debug_level": 2,
+            "debug_level": 2,  # 0: none, 1: messages, 2: 3d visualizations, 3: per-tree visualizations
             "normal_thr": 0.5,
             "voxel_size": 0.05,
             "cluster_2d": False,
@@ -38,12 +38,15 @@ if __name__ == "__main__":
             "min_gravity_alignment_score": 0.1,
         },
         "tree_analysis": {
-            "debug_level": 2,
-            "fitting_method": "pcl_ransac",  # pcl_ransac, lsq
+            "debug_level": 2,  # 0: none, 1: messages, 2: 3d visualizations, 3: per-tree visualizations
+            "max_dist_to_ground": 1e6,
+            "fitting_method": "lsq",  # pcl_ransac, lsq
             "breast_height": 1.3,
-            "breast_height_range": 1.5,
-            "max_valid_radius": 0.5,
-            "min_inliers": 4,
+            "breast_height_range": 4.5,
+            "max_valid_radius": 0.8,
+            "min_inliers": 100,
+            "outlier_thr": 0.01,
+            "loss_scale": 0.001,
         },
     }
 
