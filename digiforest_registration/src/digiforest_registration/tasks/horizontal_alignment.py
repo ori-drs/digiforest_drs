@@ -2,6 +2,10 @@ import numpy as np
 from numpy.typing import NDArray
 from numpy import float64
 import cv2
+import open3d as o3d
+import copy
+
+from digiforest_registration.tasks.height_image import HeightImage
 
 
 class HorizontalRegistration:
@@ -106,6 +110,10 @@ class HorizontalRegistration:
         # cv2.destroyAllWindows()
 
     def find_local_maxima(self, img):
+        def distance_to_border(img, y, x):
+            """Distance from to the nearest border"""
+            return min(y, img.shape[0] - y, x, img.shape[1] - x)
+
         # the input image is a float image
         # find local maxima in the image
         kernel_size = (25, 25)
@@ -118,27 +126,80 @@ class HorizontalRegistration:
         white_pixel_indices = np.where(mask == 255)
         white_points_coordinates = list(
             zip(white_pixel_indices[1], white_pixel_indices[0])
-        )
-        print(len(white_points_coordinates))
+        )  # x, y coordinates
 
         #
         grayscale_image = (img * 255).astype(np.uint8)
         maxima_img = cv2.cvtColor(grayscale_image, cv2.COLOR_GRAY2RGB)
+
+        valid_points = []
+        threshold_distance_to_border = 20
         for point in white_points_coordinates:
-            if grayscale_image[point[1], point[0]] > 0:
-                cv2.circle(maxima_img, point, 1, (0, 0, 255), -1)
+            if (
+                grayscale_image[point[1], point[0]] > 0
+                and distance_to_border(grayscale_image, point[1], point[0])
+                > threshold_distance_to_border
+            ):
+                cv2.circle(maxima_img, point, 3, (0, 0, 255), -1)
+                valid_points.append([point[0], point[1], 0])
 
         cv2.imshow("Image", maxima_img)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
+        return np.array(valid_points)
+
+    def draw_registration_result(self, source, target, transformation):
+        source_temp = copy.deepcopy(source)
+        target_temp = copy.deepcopy(target)
+        source_temp.paint_uniform_color([1, 0.706, 0])
+        target_temp.paint_uniform_color([0, 0.651, 0.929])
+        source_temp.transform(transformation)
+        o3d.visualization.draw_geometries(
+            [source_temp, target_temp],
+            zoom=0.4459,
+            front=[0.9288, -0.2951, -0.2242],
+            lookat=[1.6784, 2.0612, 1.4451],
+            up=[-0.3402, -0.9189, -0.1996],
+        )
+
+    def registration(self, ref_pts, pts):
+        """
+        Run icp on the two input clouds, doesn't work so far
+        """
+        ref_cloud = o3d.geometry.PointCloud()
+        ref_cloud.points = o3d.utility.Vector3dVector(ref_pts)
+
+        cloud = o3d.geometry.PointCloud()
+        cloud.points = o3d.utility.Vector3dVector(pts)
+
+        threshold = 0.02
+        trans_init = np.asarray(
+            [[1.0, 0, 0, 245], [0, 1.0, 0, 187], [0, 0, 1.0, 0], [0.0, 0.0, 0.0, 1.0]]
+        )
+        self.draw_registration_result(cloud, ref_cloud, trans_init)
+
+        reg_p2p = o3d.pipelines.registration.registration_icp(
+            cloud,
+            ref_cloud,
+            threshold,
+            trans_init,
+            o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+        )
+
+        print(reg_p2p)
+        print("Transformation is:")
+        print(reg_p2p.transformation)
+        self.draw_registration_result(cloud, ref_cloud, reg_p2p.transformation)
 
     def process(self):
         reference_image = self.compute_canopy_image(
             self.reference_cloud, *self.reference_ground_plane
         )
-        # img1 = self.filter_image(reference_image, name="drone.png")
         image = self.compute_canopy_image(self.cloud, *self.cloud_ground_plane)
-        # img2 = self.filter_image(image, name="frontier.png")
 
-        self.find_local_maxima(reference_image)
-        self.find_local_maxima(image)
+        proc = HeightImage()
+        _ = proc.find_local_maxima(image)
+
+        _ = self.find_local_maxima(reference_image)
+
+        # self.registration(center_pts1, center_pts2)
