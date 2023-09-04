@@ -137,9 +137,10 @@ class Pipeline:
         )
 
         # Filter by intensity
-        self._cropped_cloud = self._cropped_cloud.select_by_mask(
-            (self._cropped_cloud.point.intensity.numpy() > 20)[:, 0]
-        )
+        if "intensity" in self._cropped_cloud.point:
+            self._cropped_cloud = self._cropped_cloud.select_by_mask(
+                (self._cropped_cloud.point.intensity.numpy() > 20)[:, 0]
+            )
 
         # Extract the ground
         print("Extracting ground...")

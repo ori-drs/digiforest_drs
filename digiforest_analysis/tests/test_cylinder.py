@@ -1,4 +1,4 @@
-from digiforest_analysis.utils import cylinder, plotting
+from digiforest_analysis.utils import cylinder
 from scipy.spatial.transform import Rotation as R
 
 import open3d as o3d
@@ -6,18 +6,18 @@ import numpy as np
 import random
 
 
-def test_lsq_fit(noise=0.0, noise_perc=0.0):
+def test_lsq_fit(noise=0.0, noise_perc=0.0, **kwargs):
     r = 0.32
     h = 2.0
     pos = np.array([0.25, -0.3, 0.1]).reshape(3, 1)
-    eul = np.array([0.0, 10, 7])
+    eul = np.array([0.0, 2, 2])
     noise_perc = 0.2
 
     # Create cylinder
     cloud = cylinder.generate_test_cloud(
         radius=r,
         height=h,
-        num_points=100,
+        num_points=50,
         position=pos.reshape(3, 1),
         rotation=R.from_euler("zyx", eul, degrees=True).as_matrix(),
         noise_std=noise,
@@ -28,7 +28,7 @@ def test_lsq_fit(noise=0.0, noise_perc=0.0):
     X = cloud.point.positions.numpy()
     N = cloud.point.normals.numpy()
 
-    model = cylinder.fit(X, method="lsq", N=N)
+    model = cylinder.fit(X, method="lsq", N=N, **kwargs)
 
     c = model["position"]
     w = model["axis"]
@@ -36,10 +36,17 @@ def test_lsq_fit(noise=0.0, noise_perc=0.0):
 
     # Colorize by residual
     res = cylinder.cylinder_equation(X, c, w, r)
+    print(res)
 
     for i in range(X.shape[0]):
-        res = np.clip(np.abs(cylinder.cylinder_equation(X[i][None], c, w, r)), 0, 1)[0]
-        color = plotting.mpl_div_cmap(res)
+        # res = np.clip(np.abs(cylinder.cylinder_equation(X[i][None], c, w, r)), 0, 1)[0]
+        # color = plotting.mpl_div_cmap(res)
+
+        if i in model["inliers"]:
+            color = [0.0, 0.0, 1.0]
+        else:
+            color = [1.0, 0.0, 0.0]
+
         cloud.point.colors[i] = o3d.core.Tensor([color[0], color[1], color[2]])
 
     if model["success"]:
@@ -67,8 +74,9 @@ def test_lsq_fit(noise=0.0, noise_perc=0.0):
 
 if __name__ == "__main__":
     random.seed(42)
-    for n in np.arange(0, 0.4, 0.1):
-        for p in np.arange(0, 0.5, 0.1):
-            print(f"lsq, noise: {n:.1f} ({100*p:.1f} %)")
-            test_lsq_fit(noise=n, noise_perc=p)
-            print()
+    # for n in np.arange(0.1, 0.4, 0.1):
+    #     for p in np.arange(0.1, 0.5, 0.1):
+    #         print(f"lsq, noise: {n:.1f} ({100*p:.1f} %)")
+    #         test_lsq_fit(noise=n, noise_perc=p)
+    #         print()
+    test_lsq_fit(noise=0.2, noise_perc=0.2, outlier_thr=0.001)

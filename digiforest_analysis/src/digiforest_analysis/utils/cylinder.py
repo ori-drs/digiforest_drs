@@ -19,6 +19,7 @@ def cylinder_equation(X, c, w, r):
 def fit(X, method="lsq", **kwargs):
     # Get arguments
     min_inliers = kwargs.get("min_inliers", 10)
+    success_inlier_ratio = kwargs.get("success_inlier_ratio", 0.8)
 
     # Fit
     if method == "lsq":
@@ -65,7 +66,8 @@ def fit(X, method="lsq", **kwargs):
 
     # Parameters
     return {
-        "success": inliers.shape[0] > min_inliers,
+        # "success": inliers.shape[0] > min_inliers,
+        "success": inliers.shape[0] > success_inlier_ratio * X.shape[0],
         "position": c,
         "rotation": rotation,
         "axis": w,
@@ -134,14 +136,14 @@ def fit_lsq(X, **kwargs):
                 weight_n * residual_normals(p),
                 weight_g * residual_gravity(p),
             )
-        ).reshape(-1, 3)
+        ).transpose()
 
     def chi2(p):
-        return (residual(p) ** 2).sum(1)
+        return (residual(p) ** 2).sum(axis=1)
 
     def cost(p):
         return (
-            loss.smooth_l1(residual_cylinder(p), c=scale)
+            loss.geman_mcclure(residual_cylinder(p), c=scale)
             + weight_n * loss.l2(residual_normals(p))
             + weight_g * loss.l2(residual_gravity(p))
         ).sum()
@@ -291,7 +293,7 @@ if __name__ == "__main__":
         num_points=100,
         position=np.array([0, 1, 0]).reshape(3, 1),
         rotation=R.from_euler("zyx", [0, 0, 0], degrees=True).as_matrix(),
-        noise_std=0.0,
+        noise_std=0.2,
         noise_perc=0.2,
     )
 
