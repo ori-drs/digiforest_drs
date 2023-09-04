@@ -41,12 +41,14 @@ if __name__ == "__main__":
             "debug_level": 2,  # 0: none, 1: messages, 2: 3d visualizations, 3: per-tree visualizations
             "max_dist_to_ground": 1e6,
             "fitting_method": "lsq",  # pcl_ransac, lsq
-            "breast_height": 1.3,
-            "breast_height_range": 4.5,
+            "breast_height": 1.5,
+            "breast_height_range": 1.0,
             "max_valid_radius": 0.8,
             "min_inliers": 100,
             "outlier_thr": 0.01,
-            "loss_scale": 0.001,
+            "loss_scale": 1.0,
+            "weight_n": 0.0,
+            "weight_g": 0.0,
         },
     }
 

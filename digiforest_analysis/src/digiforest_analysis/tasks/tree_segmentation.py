@@ -23,6 +23,7 @@ class TreeSegmentation(BaseTask):
         self._min_gravity_alignment_score = kwargs.get(
             "min_gravity_alignment_score", 0.1
         )
+        self._max_cluster_size = kwargs.get("max_cluster_size", 2.0)
 
     def _process(self, **kwargs):
         """ "
@@ -90,7 +91,36 @@ class TreeSegmentation(BaseTask):
             seg_cloud = o3d.t.geometry.PointCloud(cloud.select_by_mask(mask))
             clusters.append({"cloud": seg_cloud, "info": {"id": i}})
 
-        return clusters
+        refined_clusters = []
+        idx = 0
+        for cluster in clusters:
+            extent = (
+                cluster["cloud"].get_axis_aligned_bounding_box().get_extent().numpy()
+            )
+            if extent[0] > self._max_cluster_size or extent[1] > self._max_cluster_size:
+
+                labels = clustering.cluster(
+                    cluster["cloud"],
+                    method=self._clustering_method,
+                    cluster_2d=self._cluster_2d,
+                )
+
+                # Get max number of labels
+                num_labels = labels.max() + 1
+                for i in range(num_labels):
+                    mask = labels == i
+                    seg_cloud = o3d.t.geometry.PointCloud(
+                        cluster["cloud"].select_by_mask(mask)
+                    )
+                    refined_clusters.append({"cloud": seg_cloud, "info": {"id": idx}})
+                    idx += 1
+            else:
+                refined_clusters.append(
+                    {"cloud": cluster["cloud"], "info": {"id": idx}}
+                )
+                idx += 1
+
+        return refined_clusters
 
     def filter_tree_clusters(self, clusters):
         filtered_clusters = []
@@ -100,7 +130,7 @@ class TreeSegmentation(BaseTask):
             valid_height = self.check_cluster_height(cluster)
             valid_size = self.check_cluster_size(cluster)
 
-            if True:  # valid_alignment and valid_height and valid_size:
+            if valid_height and valid_size:
                 filtered_clusters.append(cluster)
             else:
                 if not valid_alignment:
@@ -228,10 +258,9 @@ class TreeSegmentation(BaseTask):
 
         # Visualize clouds
         viz_clouds = []
-
-        # cloud_copy = cloud.clone()
-        # cloud_copy.paint_uniform_color([0.7, 0.7, 0.7])
-        # viz_clouds.append(cloud_copy.to_legacy())
+        cloud_copy = cloud.clone()
+        cloud_copy.paint_uniform_color([0.7, 0.7, 0.7])
+        viz_clouds.append(cloud_copy.to_legacy())
 
         for c in clusters:
             i = c["info"]["id"]

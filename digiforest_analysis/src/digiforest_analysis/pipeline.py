@@ -117,10 +117,34 @@ class Pipeline:
         if self._cloud is None:
             raise ValueError("'cloud or header empty'")
 
+        # Preprocess cloud
+        # # Get bounding box
+        import open3d as o3d
+
+        bbox = self._cloud.get_axis_aligned_bounding_box()
+        bbox_extent = o3d.core.Tensor([10, 10, 0], dtype=o3d.core.Dtype.Float32)
+        min_bound = bbox.get_center() - bbox_extent
+        max_bound = bbox.get_center() + bbox_extent
+        min_bound[2] -= bbox.get_half_extent()[2]
+        max_bound[2] = min_bound[2] + 10.0
+        bbox_filtered = o3d.t.geometry.AxisAlignedBoundingBox(min_bound, max_bound)
+        self._cropped_cloud = self._cloud.crop(bbox_filtered)
+
+        # remove outliers
+        # self._cropped_cloud, inliers = self._cropped_cloud.remove_statistical_outliers(nb_neighbors=10, std_ratio=0.2)
+        self._cropped_cloud, inliers = self._cropped_cloud.remove_radius_outliers(
+            nb_points=20, search_radius=0.2
+        )
+
+        # Filter by intensity
+        self._cropped_cloud = self._cropped_cloud.select_by_mask(
+            (self._cropped_cloud.point.intensity.numpy() > 20)[:, 0]
+        )
+
         # Extract the ground
         print("Extracting ground...")
         self._ground_cloud, self._forest_cloud = self._ground_segmentation.process(
-            cloud=self._cloud
+            cloud=self._cropped_cloud
         )
         self.save_cloud(self._ground_cloud, label="ground_cloud")
         self.save_cloud(self._forest_cloud, label="forest_cloud")

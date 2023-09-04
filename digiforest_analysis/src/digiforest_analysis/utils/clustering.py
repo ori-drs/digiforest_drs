@@ -99,9 +99,9 @@ def kmeans_sklearn(cloud, **kwargs):
 
 
 def euclidean_pcl(cloud, **kwargs):
-    cluster_tolerance = kwargs.get("cluster_tolerance", 0.20)
+    cluster_tolerance = kwargs.get("cluster_tolerance", 0.10)
     min_cluster_size = kwargs.get("min_cluster_size", 100)
-    max_cluster_size = kwargs.get("max_cluster_size", 10000)
+    max_cluster_size = kwargs.get("max_cluster_size", 1000000)
 
     try:
         import pcl

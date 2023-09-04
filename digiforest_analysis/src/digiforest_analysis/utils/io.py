@@ -43,7 +43,7 @@ def write_open3d(cloud, header, filename):
         cloud.translate(header["offset"])
 
     # Write cloud to file
-    o3d.io.write_point_cloud(filename, cloud.to_legacy())
+    o3d.t.io.write_point_cloud(filename, cloud)
 
     # Update header
     if header is not None:

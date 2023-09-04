@@ -111,6 +111,8 @@ class TreeAnalysis(BaseTask):
             else:
                 cylinder_mesh.paint_uniform_color([0.0, 1.0, 0.0])  # green
                 window_msg = f"Tree {info['id']}: Success"
+                print("DBH model")
+                print(f"Axis: {model['axis']}")
 
             o3d.visualization.draw_geometries(
                 [cloud.to_legacy(), cloud_filtered.to_legacy(), cylinder_mesh],

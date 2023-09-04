@@ -90,7 +90,7 @@ def fit_lsq(X, **kwargs):
     r = kwargs.get("r", 10)
 
     weight_n = kwargs.get("weight_n", 0.0)  # Normals cost weight
-    weight_g = kwargs.get("weight_g", 0.0)  # Gravit cost weight
+    weight_g = kwargs.get("weight_g", 0.0)  # Gravity cost weight
 
     outlier_thr = kwargs.get("outlier_thr", 0.01)
     scale = kwargs.get("loss_scale", 0.01)  # scale parameter
@@ -108,7 +108,7 @@ def fit_lsq(X, **kwargs):
 
     def residual_cylinder(p):
         c = np.array([p[0], p[1], p[2]]).reshape(3, 1)
-        w = np.array([p[3], p[4], p[5]]).reshape(3, 1)
+        w = np.array([p[3], p[4], p[5]]).reshape(3, 1)  # np.array([0.0, 0.0, 1.0])
         r = p[6]
 
         res = (
@@ -148,8 +148,8 @@ def fit_lsq(X, **kwargs):
 
     # Prepare bounds
     bounds = Bounds(
-        lb=[-np.inf, -np.inf, -np.inf, -1, -1, 0.95, 0.01],
-        ub=[np.inf, np.inf, np.inf, 1, 1, 1.0, np.inf],
+        lb=[-np.inf, -np.inf, -np.inf, -0.1, -0.1, 0.95, 0.01],
+        ub=[np.inf, np.inf, np.inf, 0.1, 0.1, 1.0, 0.5],
         keep_feasible=False,
     )
 
