@@ -1,4 +1,5 @@
 from open3d.geometry import PointCloud
+from digiforest_analysis.tasks import Preprocessing
 from digiforest_analysis.tasks import GroundSegmentation
 from digiforest_analysis.tasks import TreeSegmentation
 from digiforest_analysis.tasks import TreeAnalysis
@@ -28,6 +29,9 @@ class Pipeline:
         self.setup_output(out_dir)
 
         # Setup modules
+        params = kwargs.get("preprocessing", {})
+        self._preprocessing = Preprocessing(**params)
+
         params = kwargs.get("ground_segmentation", {})
         self._ground_segmentation = GroundSegmentation(**params)
 
@@ -117,10 +121,14 @@ class Pipeline:
         if self._cloud is None:
             raise ValueError("'cloud or header empty'")
 
+        # Preprocess cloud
+        print("Preprocessing...")
+        self._processed_cloud = self._preprocessing.process(cloud=self._cloud)
+
         # Extract the ground
         print("Extracting ground...")
         self._ground_cloud, self._forest_cloud = self._ground_segmentation.process(
-            cloud=self._cloud
+            cloud=self._processed_cloud
         )
         self.save_cloud(self._ground_cloud, label="ground_cloud")
         self.save_cloud(self._forest_cloud, label="forest_cloud")
