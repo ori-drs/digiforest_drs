@@ -98,7 +98,6 @@ class TreeSegmentation(BaseTask):
                 cluster["cloud"].get_axis_aligned_bounding_box().get_extent().numpy()
             )
             if extent[0] > self._max_cluster_size or extent[1] > self._max_cluster_size:
-
                 labels = clustering.cluster(
                     cluster["cloud"],
                     method=self._clustering_method,
