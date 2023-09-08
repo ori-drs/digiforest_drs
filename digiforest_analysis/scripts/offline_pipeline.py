@@ -40,7 +40,7 @@ if __name__ == "__main__":
             "normal_thr": 0.5,
             "voxel_size": 0.05,
             "cluster_2d": False,
-            "clustering_method": "hdbscan",  # many options, check clustering.py
+            "clustering_method": "euclidean_pcl",  # many options, check clustering.py: euclidean_pcl, hdbscan, dbscan_open3d, dbscan_sklearn, hdbscan_sklearn, kmeans_sklearn
             "min_tree_height": 1.5,
             "max_tree_diameter": 10.0,
             "min_tree_diameter": 0.1,
