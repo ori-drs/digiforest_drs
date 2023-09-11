@@ -64,10 +64,11 @@ def fit(X, method="lsq", **kwargs):
         # # Adjust center
         c = c + rotation @ height_shift
 
+    success = (inliers.shape[0] > success_inlier_ratio * X.shape[0]) and (height > 0)
     # Parameters
     return {
         # "success": inliers.shape[0] > min_inliers,
-        "success": inliers.shape[0] > success_inlier_ratio * X.shape[0],
+        "success": success,
         "position": c,
         "rotation": rotation,
         "axis": w,

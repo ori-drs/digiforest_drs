@@ -1,5 +1,6 @@
 from digiforest_analysis.tasks import BaseTask
 from digiforest_analysis.utils import clustering
+from digiforest_analysis.utils import plotting
 
 import open3d as o3d
 import numpy as np
@@ -24,6 +25,10 @@ class TreeSegmentation(BaseTask):
             "min_gravity_alignment_score", 0.1
         )
         self._max_cluster_size = kwargs.get("max_cluster_size", 2.0)
+
+        # Colormap parameters
+        self._cmap = plotting.color_palette
+        self._ncolors = plotting.n_colors
 
     def _process(self, **kwargs):
         """ "
@@ -111,11 +116,15 @@ class TreeSegmentation(BaseTask):
                     seg_cloud = o3d.t.geometry.PointCloud(
                         cluster["cloud"].select_by_mask(mask)
                     )
-                    refined_clusters.append({"cloud": seg_cloud, "info": {"id": idx}})
+                    color = self._cmap[idx % self._ncolors]
+                    refined_clusters.append(
+                        {"cloud": seg_cloud, "info": {"id": idx, "color": color}}
+                    )
                     idx += 1
             else:
+                color = self._cmap[idx % self._ncolors]
                 refined_clusters.append(
-                    {"cloud": cluster["cloud"], "info": {"id": idx}}
+                    {"cloud": cluster["cloud"], "info": {"id": idx, "color": color}}
                 )
                 idx += 1
 
@@ -250,20 +259,19 @@ class TreeSegmentation(BaseTask):
         return clusters
 
     def debug_visualizations(self, cloud, clusters):
-        import matplotlib.pyplot as plt
         from digiforest_analysis.utils import visualization as viz
-
-        cmap = plt.get_cmap("tab20b")
 
         # Visualize clouds
         viz_clouds = []
-        cloud_copy = cloud.clone()
-        cloud_copy.paint_uniform_color([0.7, 0.7, 0.7])
-        viz_clouds.append(cloud_copy.to_legacy())
+        # origin = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+        # viz_clouds.append(origin)
+
+        # cloud_copy = cloud.clone()
+        # cloud_copy.paint_uniform_color([0.7, 0.7, 0.7])
+        # viz_clouds.append(cloud_copy.to_legacy())
 
         for c in clusters:
-            i = c["info"]["id"]
-            color = cmap(i % 20)[:3]
+            color = c["info"]["color"]
 
             tree_cloud = c["cloud"].clone()
             tree_cloud.paint_uniform_color(color)
@@ -291,10 +299,10 @@ class TreeSegmentation(BaseTask):
 
         o3d.visualization.draw_geometries(
             viz_clouds,
-            zoom=0.7,
-            front=[0.79, 0.02, 0.60],
-            lookat=cloud.get_center().numpy(),
-            up=[-0.60, -0.012, 0.79],
+            zoom=self.viz_zoom,
+            front=[0.79, 0.2, 0.60],
+            lookat=self.viz_center,
+            up=[-0.55, -0.15, 0.8],
             window_name="tree_segmentation",
         )
 

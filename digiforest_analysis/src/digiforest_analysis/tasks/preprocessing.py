@@ -82,16 +82,18 @@ class Preprocessing(BaseTask):
         bbox_cropped = cropped_cloud.get_axis_aligned_bounding_box()
         bbox_cropped.set_color([1.0, 0.0, 0.0])
 
+        # origin = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
         o3d.visualization.draw_geometries(
             [
+                # origin,
                 original.to_legacy(),
                 bbox_original.to_legacy(),
                 cropped.to_legacy(),
                 bbox_cropped.to_legacy(),
             ],
-            zoom=0.7,
-            front=[0.79, 0.02, 0.60],
-            lookat=original.get_center().numpy(),
-            up=[-0.60, -0.012, 0.79],
+            zoom=self.viz_zoom,
+            front=[0.79, 0.2, 0.60],
+            lookat=bbox_cropped.get_center().numpy(),
+            up=[-0.55, -0.15, 0.8],
             window_name="preprocessing",
         )
