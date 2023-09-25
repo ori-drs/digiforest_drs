@@ -12,6 +12,8 @@ class Preprocessing(BaseTask):
 
         self._noise_filter_points = kwargs.get("noise_filter_points", 20)
         self._noise_filter_radius = kwargs.get("noise_filter_radius", 0.2)
+        self._noise_filter_neigh = kwargs.get("noise_filter_neigh", 10)
+        self._noise_filter_std = kwargs.get("noise_filter_std", 0.2)
 
         self._intensity_thr = kwargs.get("intensity_thr", 20)
 
@@ -23,10 +25,13 @@ class Preprocessing(BaseTask):
         processed_cloud = cloud.crop(crop_box)
 
         # remove outliers
-        # self._cropped_cloud, inliers = self._cropped_cloud.remove_statistical_outliers(nb_neighbors=10, std_ratio=0.2)
-        processed_cloud, inliers = processed_cloud.remove_radius_outliers(
-            nb_points=self._noise_filter_points, search_radius=self._noise_filter_radius
+        processed_cloud, inliers = processed_cloud.remove_statistical_outliers(
+            nb_neighbors=self._noise_filter_neigh, std_ratio=self._noise_filter_std
         )
+        # Radius-based filter uses too much memory
+        # processed_cloud, inliers = processed_cloud.remove_radius_outliers(
+        #     nb_points=self._noise_filter_points, search_radius=self._noise_filter_radius
+        # )
 
         # Filter by intensity
         if "intensity" in processed_cloud.point:
