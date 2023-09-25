@@ -1,2 +1,5 @@
 *.pyc
 env/*
+.ipynb_checkpoints/
+*.vscode/
+*.egg-info/
