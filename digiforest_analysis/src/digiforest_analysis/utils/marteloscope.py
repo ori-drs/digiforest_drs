@@ -1,19 +1,15 @@
-import matplotlib.pyplot as plt
-
-
-def plot(trees, ax, cmap="tab20b", **kwargs):
+def plot(trees, ax, **kwargs):
     from matplotlib.patches import Circle
-
-    color_map = plt.get_cmap(cmap)
 
     for tree in trees:
         x = tree["info"]["dbh_model"]["position"][0]
         y = tree["info"]["dbh_model"]["position"][1]
         r = tree["info"]["dbh"] / 2
         i = tree["info"]["id"]
+        color = tree["info"]["color"]
 
         # Plot dbh
-        circle = Circle((x, y), r, color=color_map(i % 20)[:3], alpha=1.0)
+        circle = Circle((x, y), r, color=color, alpha=1.0)
         ax.add_patch(
             circle,
         )
@@ -21,7 +17,7 @@ def plot(trees, ax, cmap="tab20b", **kwargs):
             x + 0.1,
             y + 0.1,
             f"{i}",
-            fontsize=9,
+            fontsize=7,
             ha="center",
             va="bottom",
         )
@@ -40,7 +36,7 @@ def plot(trees, ax, cmap="tab20b", **kwargs):
 
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
-    ax.set_title("Tree Locations")
+    ax.set_title("Marteloscope")
     ax.autoscale_view()
     ax.set_aspect("equal")
     # ax.legend()

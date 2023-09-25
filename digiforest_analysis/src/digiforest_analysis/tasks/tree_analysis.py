@@ -150,14 +150,13 @@ class TreeAnalysis(BaseTask):
         import numpy as np
         from digiforest_analysis.utils import visualization as viz
 
-        cmap = plt.get_cmap("tab20b")
-
         # Visualize clouds
         viz_clouds = []
+        # origin = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+        # viz_clouds.append(origin)
 
         for t in trees:
             tree_cloud = t["cloud"].clone()
-            i = t["info"]["id"]
             # tree_cloud.paint_uniform_color(cmap(i % 20)[:3])
             tree_cloud.paint_uniform_color([0.7, 0.7, 0.7])
             viz_clouds.append(tree_cloud.to_legacy())
@@ -167,8 +166,7 @@ class TreeAnalysis(BaseTask):
             tree_cloud = t["cloud"].clone()
             trees_center += tree_cloud.get_center().numpy()
 
-            i = t["info"]["id"]
-            color = cmap(i % 20)[:3]
+            color = t["info"]["color"]
             tree_cloud.paint_uniform_color(color)
             viz_clouds.append(tree_cloud.to_legacy())
 
@@ -186,17 +184,17 @@ class TreeAnalysis(BaseTask):
 
         o3d.visualization.draw_geometries(
             viz_clouds,
-            zoom=0.7,
-            front=[0.79, 0.02, 0.60],
-            lookat=trees_center,
-            up=[-0.60, -0.012, 0.79],
+            zoom=self.viz_zoom,
+            front=[0.79, 0.2, 0.60],
+            lookat=self.viz_center,
+            up=[-0.55, -0.15, 0.8],
             window_name="tree_analysis",
         )
 
         from digiforest_analysis.utils import marteloscope
 
         fig, ax = plt.subplots()
-        marteloscope.plot(filtered_trees, ax, cmap="tab20b")
+        marteloscope.plot(filtered_trees, ax)
 
         ax.set_xlabel("X [m]")
         ax.set_ylabel("Y [m]")

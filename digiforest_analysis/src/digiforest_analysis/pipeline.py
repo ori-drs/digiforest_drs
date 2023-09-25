@@ -125,6 +125,15 @@ class Pipeline:
         print("Preprocessing...")
         self._processed_cloud = self._preprocessing.process(cloud=self._cloud)
 
+        # Set visualization center
+        viz_center = (
+            self._processed_cloud.get_axis_aligned_bounding_box().get_center().numpy()
+        )
+        self._ground_segmentation.viz_center = viz_center
+        self._tree_segmentation.viz_center = viz_center
+        self._tree_analysis.viz_center = viz_center
+        self._forest_analysis.viz_center = viz_center
+
         # Extract the ground
         print("Extracting ground...")
         self._ground_cloud, self._forest_cloud = self._ground_segmentation.process(

@@ -13,21 +13,24 @@ if __name__ == "__main__":
     )
     parser.add_argument("filename")  # positional argument
     parser.add_argument("--out", default=None)
+    parser.add_argument("--viz_zoom", default=0.7, type=float)
     args = parser.parse_args()
 
     # Default config
     params = {
         "preprocessing": {
             "debug_level": 2,  # 0: none, 1: messages, 2: 3d visualizations, 3: per-tree
-            "crop_x": 70.0,  # Full extent along x
-            "crop_y": 70.0,  # Full extent along y
-            "crop_z": 30.0,  # Full extent along z
+            "viz_zoom": args.viz_zoom,
+            "crop_x": 80.0,  # Full extent along x
+            "crop_y": 80.0,  # Full extent along y
+            "crop_z": 20.0,  # Full extent along z
             "noise_filter_points": 20,  # For radius filtering
             "noise_filter_radius": 0.2,  # For radius filtering
             "intensity_thr": 20,  # For intensity filtering
         },
         "ground_segmentation": {
             "debug_level": 2,  # 0: none, 1: messages, 2: 3d visualizations, 3: per-tree visualizations
+            "viz_zoom": args.viz_zoom,
             "method": "default",  # default, indexing, csf
             "voxel_filter_size": 0.05,
             "max_distance_to_plane": 0.5,
@@ -37,6 +40,7 @@ if __name__ == "__main__":
         },
         "tree_segmentation": {
             "debug_level": 2,  # 0: none, 1: messages, 2: 3d visualizations, 3: per-tree visualizations
+            "viz_zoom": args.viz_zoom,
             "normal_thr": 0.5,
             "voxel_size": 0.05,
             "cluster_2d": False,
@@ -48,6 +52,7 @@ if __name__ == "__main__":
         },
         "tree_analysis": {
             "debug_level": 2,  # 0: none, 1: messages, 2: 3d visualizations, 3: per-tree visualizations
+            "viz_zoom": args.viz_zoom,
             "max_dist_to_ground": 1e6,
             "fitting_method": "lsq",  # pcl_ransac, lsq
             "breast_height": 1.5,

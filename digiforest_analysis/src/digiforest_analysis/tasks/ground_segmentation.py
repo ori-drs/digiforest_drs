@@ -200,12 +200,17 @@ class GroundSegmentation(BaseTask):
         forest = forest_cloud.clone()
         forest.paint_uniform_color([1.0, 0.0, 0.0])
 
+        # origin = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
         o3d.visualization.draw_geometries(
-            [ground.to_legacy(), forest.to_legacy()],
-            zoom=0.7,
-            front=[0.79, 0.02, 0.60],
-            lookat=forest.get_center().numpy(),
-            up=[-0.60, -0.012, 0.79],
+            [
+                # origin,
+                ground.to_legacy(),
+                forest.to_legacy(),
+            ],
+            zoom=self.viz_zoom,
+            front=[0.79, 0.2, 0.60],
+            lookat=self.viz_center,
+            up=[-0.55, -0.15, 0.8],
             window_name="ground_segmentation",
         )
 
