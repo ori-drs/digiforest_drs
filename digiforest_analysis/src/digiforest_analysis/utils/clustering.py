@@ -20,6 +20,12 @@ def cluster(cloud, method="dbscan_open3d", **kwargs):
     elif method == "euclidean_pcl":
         return euclidean_pcl(cloud, **kwargs)
 
+    elif method == "voronoi":
+        ground_cloud = kwargs.get("ground_cloud")
+        if ground_cloud is None:
+            raise ValueError("Ground cloud is required for voronoi clustering")
+        return voronoi(cloud, ground_cloud, **kwargs)
+
     else:
         raise ValueError(f"Clustering method [{method}] not supported")
 
@@ -129,5 +135,29 @@ def euclidean_pcl(cloud, **kwargs):
     for i, ind in enumerate(cluster_indices):
         for j in ind:
             labels[j] = i
+
+    return labels
+
+
+def voronoi(forest_cloud, ground_cloud, **kwargs):
+    labels = -np.ones(forest_cloud.point.positions.shape[0], dtype=np.int32)
+    forest_points = forest_cloud.point.positions
+    forest_points = forest_points.numpy()
+    ground_points = ground_cloud.point.positions
+    ground_points = ground_points.numpy()
+
+    # fit cloth to ground_cloud
+
+    # normalize heights
+
+    # crop point cloud between cluster_stri_min and cluster_stri_max
+
+    # perform db scan clustring
+
+    # clean up non-stem points
+
+    # fit tree axes to clusters
+
+    # perform voronoi tesselation of point cloud without floor
 
     return labels
