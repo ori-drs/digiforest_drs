@@ -1,7 +1,11 @@
 import numpy as np
+from scipy.interpolate import RegularGridInterpolator
+from digiforest_analysis.utils.timing import Timer
+
+timer = Timer()
 
 
-def cluster(cloud, method="dbscan_open3d", ground_cloud=None, **kwargs):
+def cluster(cloud, method="dbscan_open3d", **kwargs):
     if method == "dbscan_open3d":
         return dbscan_open3d(cloud, **kwargs)
 
@@ -21,9 +25,7 @@ def cluster(cloud, method="dbscan_open3d", ground_cloud=None, **kwargs):
         return euclidean_pcl(cloud, **kwargs)
 
     elif method == "voronoi":
-        if ground_cloud is None:
-            raise ValueError("Ground cloud is required for voronoi clustering")
-        return voronoi(cloud, ground_cloud, **kwargs)
+        return voronoi(cloud, **kwargs)
 
     else:
         raise ValueError(f"Clustering method [{method}] not supported")
@@ -138,24 +140,33 @@ def euclidean_pcl(cloud, **kwargs):
     return labels
 
 
-def voronoi(forest_cloud, ground_cloud, **kwargs):
-    labels = -np.ones(forest_cloud.point.positions.shape[0], dtype=np.int32)
-    forest_points = forest_cloud.point.positions.numpy()
-    ground_points = ground_cloud.point.positions.numpy()
-    print(forest_points.shape, ground_points.shape)
+def voronoi(cloud, **kwargs):
+    labels = -np.ones(cloud.point.positions.shape[0], dtype=np.int32)
+    forest_points = cloud.point.positions.numpy()
 
-    # fit cloth to ground_cloud
+    # 1. Normalize heights
+    cloth = kwargs.get("cloth", None)
+    if cloth is not None:
+        with timer("Normalize Heights"):  # TODO remove: 25 ms
+            interpolator = RegularGridInterpolator(
+                points=(cloth[:, 0, 1], cloth[0, :, 0]),
+                values=cloth[:, :, 2],
+                method="linear",
+                bounds_error=False,
+                fill_value=0.0,
+            )
+            heights = interpolator(forest_points[:, :2])
+            forest_points[:, 2] -= heights
+        print(timer)
 
-    # normalize heights
+    # 2. Crop point cloud between cluster_stri_min and cluster_stri_max
 
-    # crop point cloud between cluster_stri_min and cluster_stri_max
+    # 3. Perform db scan clustering
 
-    # perform db scan clustring
+    # 4. Clean up non-stem points
 
-    # clean up non-stem points
+    # 5. Fit tree axes to clusters
 
-    # fit tree axes to clusters
-
-    # perform voronoi tesselation of point cloud without floor
+    # 6. Perform voronoi tesselation of point cloud without floor
 
     return labels

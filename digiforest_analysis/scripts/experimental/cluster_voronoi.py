@@ -16,17 +16,7 @@ if __name__ == "__main__":
         R = o3d.geometry.TriangleMesh.get_rotation_matrix_from_quaternion(rotation)
         cloud.rotate(R, center=location)
 
-    ground_seg = gs.GroundSegmentation(debug_level=2, method="default")
-    ground_cloud, forest_cloud = ground_seg.process(cloud=cloud)
-    tree_seg = ts.TreeSegmentation(
-        debug_level=2,
-        clustering_method="voronoi",
-        normal_thr=0.5,
-        voxel_size=0.05,
-        cluster_2d=False,
-        min_tree_height=1.5,
-        max_tree_diameter=10.0,
-        min_tree_diameter=0.1,
-        min_gravity_alignment_score=0.1,
-    )
-    tree_seg.process(cloud=cloud, ground_cloud=ground_cloud)
+    ground_seg = gs.GroundSegmentation(debug_level=0, method="csf", cell_size=2)
+    _, forest_cloud, cloth = ground_seg.process(cloud=cloud, export_cloth=True)
+    tree_seg = ts.TreeSegmentation(debug_level=0, clustering_method="voronoi")
+    tree_seg.process(cloud=forest_cloud, cloth=cloth)
