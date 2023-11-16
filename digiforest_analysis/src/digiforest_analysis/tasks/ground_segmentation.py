@@ -1,7 +1,10 @@
 from digiforest_analysis.tasks import BaseTask
+from digiforest_analysis.utils.timing import Timer
 
 import numpy as np
 import open3d as o3d
+
+timer = Timer()
 
 
 class GroundSegmentation(BaseTask):
@@ -29,13 +32,20 @@ class GroundSegmentation(BaseTask):
         elif self._method == "indexing":
             ground_cloud, forest_cloud = self.run_indexing(cloud)
         elif self._method == "csf":
-            ground_cloud, forest_cloud = self.run_csf(cloud)
+            export_cloth = kwargs.get("export_cloth", False)
+            if export_cloth:
+                ground_cloud, forest_cloud, cloth = self.run_csf(cloud, export_cloth)
+            else:
+                ground_cloud, forest_cloud = self.run_csf(cloud, export_cloth)
 
         # Debug visualizations
         if self._debug_level > 1:
             self.debug_visualizations(ground_cloud, forest_cloud)
 
-        return ground_cloud, forest_cloud
+        if self._method == "csf" and export_cloth:
+            return ground_cloud, forest_cloud, cloth
+        else:
+            return ground_cloud, forest_cloud
 
     def run_default(self, cloud):
         # Filter by normal
@@ -171,7 +181,7 @@ class GroundSegmentation(BaseTask):
 
         return refined_ground_cloud, forest_cloud
 
-    def run_csf(self, cloud):
+    def run_csf(self, cloud, export_cloth=False):
         # This requires to "pip install cloth-simulation-filter"
         import CSF
 
@@ -190,7 +200,37 @@ class GroundSegmentation(BaseTask):
         ground_cloud = cloud.select_by_index(ground_indices)
         forest_cloud = cloud.select_by_index(forest_indices)
 
-        return ground_cloud, forest_cloud
+        if export_cloth:
+            verts = np.array(csf.do_cloth_export()).reshape((-1, 3))
+            # transform this height representation into a MxNx3 tensor with
+            # X, Y, Z coordinates.
+            # Round X, Y to 10th of a milimeter to use it as a unique key
+            with timer("creating cloth"):
+                verts[:, :2] = verts[:, :2].round(decimals=4)
+                x_cos = np.sort(np.unique(verts[:, 0]))
+                y_cos = np.sort(np.unique(verts[:, 1]))
+                X, Y = np.meshgrid(x_cos, y_cos)
+                Z = np.zeros_like(X)
+
+                # when developing, this ordering was the one used in CSF
+                x_id, y_id = np.meshgrid(
+                    np.arange(x_cos.shape[0]), np.arange(y_cos.shape[0])
+                )
+                x_id, y_id = x_id.reshape(-1), y_id.reshape(-1)
+
+                # # If for whatever reason the sorting of the cloth elevations is
+                # # different, this is a way to get the correct indices (~4x slower)
+                # x_cos_dict = {x: i for i, x in enumerate(x_cos)}
+                # y_cos_dict = {y: i for i, y in enumerate(y_cos)}
+                # x_id = np.vectorize(x_cos_dict.get)(verts[:, 0])
+                # y_id = np.vectorize(y_cos_dict.get)(verts[:, 1])
+
+                Z[y_id, x_id] = verts[:, 2]
+                cloth = np.stack((X, Y, Z), axis=-1)
+            print(timer)
+            return ground_cloud, forest_cloud, cloth
+        else:
+            return ground_cloud, forest_cloud
 
     def debug_visualizations(self, ground_cloud, forest_cloud):
         # Visualize clouds
