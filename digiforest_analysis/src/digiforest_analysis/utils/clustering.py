@@ -1,7 +1,7 @@
 import numpy as np
 
 
-def cluster(cloud, method="dbscan_open3d", **kwargs):
+def cluster(cloud, method="dbscan_open3d", ground_cloud=None, **kwargs):
     if method == "dbscan_open3d":
         return dbscan_open3d(cloud, **kwargs)
 
@@ -21,7 +21,6 @@ def cluster(cloud, method="dbscan_open3d", **kwargs):
         return euclidean_pcl(cloud, **kwargs)
 
     elif method == "voronoi":
-        ground_cloud = kwargs.get("ground_cloud")
         if ground_cloud is None:
             raise ValueError("Ground cloud is required for voronoi clustering")
         return voronoi(cloud, ground_cloud, **kwargs)
@@ -141,10 +140,9 @@ def euclidean_pcl(cloud, **kwargs):
 
 def voronoi(forest_cloud, ground_cloud, **kwargs):
     labels = -np.ones(forest_cloud.point.positions.shape[0], dtype=np.int32)
-    forest_points = forest_cloud.point.positions
-    forest_points = forest_points.numpy()
-    ground_points = ground_cloud.point.positions
-    ground_points = ground_points.numpy()
+    forest_points = forest_cloud.point.positions.numpy()
+    ground_points = ground_cloud.point.positions.numpy()
+    print(forest_points.shape, ground_points.shape)
 
     # fit cloth to ground_cloud
 
