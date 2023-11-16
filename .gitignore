@@ -3,3 +3,4 @@ env/*
 .ipynb_checkpoints/
 *.vscode/
 *.egg-info/
+cloth_nodes.txt
