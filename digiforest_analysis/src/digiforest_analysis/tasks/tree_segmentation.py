@@ -39,18 +39,13 @@ class TreeSegmentation(BaseTask):
         """
         cloud = kwargs.get("cloud")
         assert len(cloud.point.normals) > 0
-
-        ground_cloud = kwargs.get("ground_cloud")
-        if ground_cloud is not None:
-            assert len(ground_cloud.point.normals) > 0
-        elif self._clustering_method == "voronoi":
-            raise ValueError("Ground cloud is required for voronoi clustering")
+        del kwargs["cloud"]  # so **kwargs doesn't lead to duplicate cloud arg
 
         # Prefiltering
         cloud = self.prefiltering(cloud)
 
         # Extract clusters
-        clusters = self.clustering(cloud, ground_cloud=ground_cloud)
+        clusters = self.clustering(cloud, **kwargs)
         if self._debug_level > 0:
             print("Extracted " + str(len(clusters)) + " initial clusters.")
 
@@ -86,11 +81,11 @@ class TreeSegmentation(BaseTask):
 
         return new_cloud
 
-    def clustering(self, cloud, ground_cloud=None):
+    def clustering(self, cloud, cloth=None):
         # Run clustering
         labels = clustering.cluster(
             cloud,
-            ground_cloud=ground_cloud,
+            cloth=cloth,
             method=self._clustering_method,
             cluster_2d=self._cluster_2d,
         )
