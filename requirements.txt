@@ -13,3 +13,4 @@ pyyaml
 ipympl
 open3d>=0.17.0
 pytest
+hdbscan

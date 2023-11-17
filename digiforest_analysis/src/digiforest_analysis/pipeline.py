@@ -80,10 +80,17 @@ class Pipeline:
         assert len(self._cloud.point.positions) > 0
 
         # Compute normals if not available
-        if not hasattr(self._cloud.point, "normals"):
+        try:
+            if not hasattr(self._cloud.point, "normals"):
+                print("No normals found in cloud, computing...", end="")
+                self._cloud.estimate_normals()
+                print("done")
+        except KeyError:
             print("No normals found in cloud, computing...", end="")
             self._cloud.estimate_normals()
             print("done")
+        except Exception as e:
+            print("The following error occurred: " + str(e))
 
     def setup_output(self, output_dir):
         self._output_dir = Path(output_dir)
