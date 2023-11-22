@@ -4,6 +4,7 @@ from scipy.interpolate import RegularGridInterpolator
 from digiforest_analysis.utils.timing import Timer
 from skimage.transform import hough_circle
 from sklearn.decomposition import PCA
+import open3d as o3d
 
 timer = Timer()
 
@@ -163,8 +164,8 @@ def voronoi(cloud, **kwargs):
     TIME = time.time()
 
     # 2. Crop point cloud between cluster_strip_min and cluster_strip_max
-    cluster_strip_min = kwargs.get("cluster_strip_min", 1.5)
-    cluster_strip_max = kwargs.get("cluster_strip_max", 5.0)
+    cluster_strip_min = kwargs.get("cluster_strip_min", 5.0)
+    cluster_strip_max = kwargs.get("cluster_strip_max", 6.0)
     points_numpy = cloud.point.positions.numpy()
     cluster_strip_mask = np.logical_and(
         points_numpy[:, 2] > cluster_strip_min, points_numpy[:, 2] < cluster_strip_max
@@ -229,14 +230,37 @@ def voronoi(cloud, **kwargs):
         pca = PCA(n_components=3)
         pca.fit(cluster_points)
         tree_axis = pca.components_[0]
-        axes.append({"axis": tree_axis, "center": np.array([x_c, y_c, 0.0])})
+
+        # convert cluster_points into open3d point cloud and give a random color
+        cluster_points = o3d.geometry.PointCloud(
+            o3d.utility.Vector3dVector(cluster_points)
+        )
+        cluster_points.paint_uniform_color(np.random.rand(3))
+        axes.append(
+            {
+                "axis": tree_axis,
+                "center": np.array([x_c, y_c, 0.0]),
+                "rot_mat": np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]])
+                @ pca.components_,
+                "cloud": cluster_points,
+            }
+        )
 
         # # visualization
         # viz_pointcloud = o3d.geometry.PointCloud()
         # viz_pointcloud.points = o3d.utility.Vector3dVector(cluster_points)
         # cylinder = o3d.geometry.TriangleMesh.create_cylinder(radius=r, height=3.5)
         # cylinder.vertices = o3d.utility.Vector3dVector(np.array(cylinder.vertices) + np.array([x_c, y_c, 3.5]))
-        # o3d.visualization.draw_geometries([viz_pointcloud, cylinder])
+    cylinders = []
+    for axis in axes:
+        cylinder = o3d.geometry.TriangleMesh.create_cylinder(radius=0.05, height=50)
+        cylinder.paint_uniform_color([0, 0, 1])
+        cylinder.vertices = o3d.utility.Vector3dVector(
+            (axis["rot_mat"].T @ np.array(cylinder.vertices).T).T + axis["center"]
+        )
+        cylinders.append(cylinder)
+
+    o3d.visualization.draw_geometries([c["cloud"] for c in axes] + cylinders)
 
     # 6. Perform voronoi tesselation of point cloud without floor
     # calculate distance to each axis

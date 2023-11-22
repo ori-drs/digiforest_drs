@@ -18,5 +18,5 @@ if __name__ == "__main__":
 
     ground_seg = gs.GroundSegmentation(debug_level=0, method="csf", cell_size=2)
     _, forest_cloud, cloth = ground_seg.process(cloud=cloud, export_cloth=True)
-    tree_seg = ts.TreeSegmentation(debug_level=0, clustering_method="voronoi")
+    tree_seg = ts.TreeSegmentation(debug_level=1, clustering_method="voronoi")
     tree_seg.process(cloud=forest_cloud, cloth=cloth, recluster_flag=False)
