@@ -81,7 +81,7 @@ class TreeSegmentation(BaseTask):
 
         return new_cloud
 
-    def clustering(self, cloud, cloth=None):
+    def clustering(self, cloud, cloth=None, recluster_flag=True):
         # Run clustering
         labels = clustering.cluster(
             cloud,
@@ -106,7 +106,9 @@ class TreeSegmentation(BaseTask):
             extent = (
                 cluster["cloud"].get_axis_aligned_bounding_box().get_extent().numpy()
             )
-            if extent[0] > self._max_cluster_size or extent[1] > self._max_cluster_size:
+            if recluster_flag and (
+                extent[0] > self._max_cluster_size or extent[1] > self._max_cluster_size
+            ):
                 labels = clustering.cluster(
                     cluster["cloud"],
                     method=self._clustering_method,
@@ -288,18 +290,18 @@ class TreeSegmentation(BaseTask):
             mesh = viz.bbox_to_mesh(bbox, depth=0.1, offset=[0, 0, -0.1], color=color)
             viz_clouds.append(mesh)
 
-        for i, t in enumerate(self.rejected_clusters):
-            color = [0.1, 0.1, 0.1]
-            tree_cloud = t["cloud"].clone()
-            tree_cloud.paint_uniform_color(color)
-            viz_clouds.append(tree_cloud.to_legacy())
+        # for i, t in enumerate(self.rejected_clusters):
+        #     color = [0.1, 0.1, 0.1]
+        #     tree_cloud = t["cloud"].clone()
+        #     tree_cloud.paint_uniform_color(color)
+        #     viz_clouds.append(tree_cloud.to_legacy())
 
-            bbox = tree_cloud.get_axis_aligned_bounding_box()
-            bbox.set_color(color)
-            viz_clouds.append(bbox.to_legacy())
+        #     bbox = tree_cloud.get_axis_aligned_bounding_box()
+        #     bbox.set_color(color)
+        #     viz_clouds.append(bbox.to_legacy())
 
-            mesh = viz.bbox_to_mesh(bbox, depth=0.1, offset=[0, 0, -0.1], color=color)
-            viz_clouds.append(mesh)
+        #     mesh = viz.bbox_to_mesh(bbox, depth=0.1, offset=[0, 0, -0.1], color=color)
+        #     viz_clouds.append(mesh)
 
         o3d.visualization.draw_geometries(
             viz_clouds,
