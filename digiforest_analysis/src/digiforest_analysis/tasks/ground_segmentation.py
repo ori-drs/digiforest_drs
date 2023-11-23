@@ -205,29 +205,27 @@ class GroundSegmentation(BaseTask):
             # transform this height representation into a MxNx3 tensor with
             # X, Y, Z coordinates.
             # Round X, Y to 10th of a milimeter to use it as a unique key
-            with timer("creating cloth"):
-                verts[:, :2] = verts[:, :2].round(decimals=4)
-                x_cos = np.sort(np.unique(verts[:, 0]))
-                y_cos = np.sort(np.unique(verts[:, 1]))
-                X, Y = np.meshgrid(x_cos, y_cos)
-                Z = np.zeros_like(X)
+            verts[:, :2] = verts[:, :2].round(decimals=4)
+            x_cos = np.sort(np.unique(verts[:, 0]))
+            y_cos = np.sort(np.unique(verts[:, 1]))
+            X, Y = np.meshgrid(x_cos, y_cos)
+            Z = np.zeros_like(X)
 
-                # when developing, this ordering was the one used in CSF
-                x_id, y_id = np.meshgrid(
-                    np.arange(x_cos.shape[0]), np.arange(y_cos.shape[0])
-                )
-                x_id, y_id = x_id.reshape(-1), y_id.reshape(-1)
+            # when developing, this ordering was the one used in CSF
+            x_id, y_id = np.meshgrid(
+                np.arange(x_cos.shape[0]), np.arange(y_cos.shape[0])
+            )
+            x_id, y_id = x_id.reshape(-1), y_id.reshape(-1)
 
-                # # If for whatever reason the sorting of the cloth elevations is
-                # # different, this is a way to get the correct indices (~4x slower)
-                # x_cos_dict = {x: i for i, x in enumerate(x_cos)}
-                # y_cos_dict = {y: i for i, y in enumerate(y_cos)}
-                # x_id = np.vectorize(x_cos_dict.get)(verts[:, 0])
-                # y_id = np.vectorize(y_cos_dict.get)(verts[:, 1])
+            # # If for whatever reason the sorting of the cloth elevations is
+            # # different, this is a way to get the correct indices (~4x slower)
+            # x_cos_dict = {x: i for i, x in enumerate(x_cos)}
+            # y_cos_dict = {y: i for i, y in enumerate(y_cos)}
+            # x_id = np.vectorize(x_cos_dict.get)(verts[:, 0])
+            # y_id = np.vectorize(y_cos_dict.get)(verts[:, 1])
 
-                Z[y_id, x_id] = verts[:, 2]
-                cloth = np.stack((X, Y, Z), axis=-1)
-            print(timer)
+            Z[y_id, x_id] = verts[:, 2]
+            cloth = np.stack((X, Y, Z), axis=-1)
             return ground_cloud, forest_cloud, cloth
         else:
             return ground_cloud, forest_cloud

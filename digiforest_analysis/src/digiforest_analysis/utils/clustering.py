@@ -1,4 +1,3 @@
-import time
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 from digiforest_analysis.utils.timing import Timer
@@ -150,22 +149,19 @@ def voronoi(cloud, **kwargs):
     # 1. Normalize heights
     cloth = kwargs.get("cloth", None)
     if cloth is not None:
-        with timer("Normalize Heights"):  # TODO remove: 25 ms
-            interpolator = RegularGridInterpolator(
-                points=(cloth[:, 0, 1], cloth[0, :, 0]),
-                values=cloth[:, :, 2],
-                method="linear",
-                bounds_error=False,
-                fill_value=0.0,
-            )
-            heights = interpolator(cloud.point.positions.numpy()[:, :2])
-            cloud.point.positions[:, 2] -= heights.astype(np.float32)
-        print(timer)
-    TIME = time.time()
+        interpolator = RegularGridInterpolator(
+            points=(cloth[:, 0, 1], cloth[0, :, 0]),
+            values=cloth[:, :, 2],
+            method="linear",
+            bounds_error=False,
+            fill_value=0.0,
+        )
+        heights = interpolator(cloud.point.positions.numpy()[:, :2])
+        cloud.point.positions[:, 2] -= heights.astype(np.float32)
 
     # 2. Crop point cloud between cluster_strip_min and cluster_strip_max
     cluster_strip_min = kwargs.get("cluster_strip_min", 5.0)
-    cluster_strip_max = kwargs.get("cluster_strip_max", 6.0)
+    cluster_strip_max = kwargs.get("cluster_strip_max", 8.0)
     points_numpy = cloud.point.positions.numpy()
     cluster_strip_mask = np.logical_and(
         points_numpy[:, 2] > cluster_strip_min, points_numpy[:, 2] < cluster_strip_max
@@ -205,7 +201,6 @@ def voronoi(cloud, **kwargs):
                     "Cluster not extending between cluster_strip_min and cluster_strip_max"
                 )
             continue
-
         # 4.2. Find circles in projection of cloud onto x-y plane
         x_c, y_c, r, max_vote = fit_circle_hough(
             points=cluster_points, grid_res=0.02, min_radius=0.05, max_radius=0.5
@@ -239,7 +234,8 @@ def voronoi(cloud, **kwargs):
         axes.append(
             {
                 "axis": tree_axis,
-                "center": np.array([x_c, y_c, 0.0]),
+                "center": np.array([x_c, y_c, cluster_strip_min]),
+                "radius": r,
                 "rot_mat": np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]])
                 @ pca.components_,
                 "cloud": cluster_points,
@@ -251,16 +247,20 @@ def voronoi(cloud, **kwargs):
         # viz_pointcloud.points = o3d.utility.Vector3dVector(cluster_points)
         # cylinder = o3d.geometry.TriangleMesh.create_cylinder(radius=r, height=3.5)
         # cylinder.vertices = o3d.utility.Vector3dVector(np.array(cylinder.vertices) + np.array([x_c, y_c, 3.5]))
-    cylinders = []
-    for axis in axes:
-        cylinder = o3d.geometry.TriangleMesh.create_cylinder(radius=0.05, height=50)
-        cylinder.paint_uniform_color([0, 0, 1])
-        cylinder.vertices = o3d.utility.Vector3dVector(
-            (axis["rot_mat"].T @ np.array(cylinder.vertices).T).T + axis["center"]
-        )
-        cylinders.append(cylinder)
 
-    o3d.visualization.draw_geometries([c["cloud"] for c in axes] + cylinders)
+    if kwargs.get("debug_level", 0) > 1:
+        cylinders = []
+        for axis in axes:
+            cylinder_height = cluster_strip_max - cluster_strip_min
+            cylinder = o3d.geometry.TriangleMesh.create_cylinder(
+                radius=axis["radius"], height=cylinder_height * 2
+            )
+            cylinder.paint_uniform_color([0, 0, 1])
+            cylinder.vertices = o3d.utility.Vector3dVector(
+                (axis["rot_mat"].T @ np.array(cylinder.vertices).T).T + axis["center"]
+            )
+            cylinders.append(cylinder)
+        o3d.visualization.draw_geometries([c["cloud"] for c in axes] + cylinders)
 
     # 6. Perform voronoi tesselation of point cloud without floor
     # calculate distance to each axis
@@ -277,11 +277,11 @@ def voronoi(cloud, **kwargs):
     signed_dist_a = np.einsum("ijk,jk->ij", axis_pnts_to_pc, normals_a)
     signed_dist_b = np.einsum("ijk,jk->ij", axis_pnts_to_pc, normals_b)
     dists = np.sqrt(np.power(signed_dist_a, 2) + np.power(signed_dist_b, 2))
-    print(f"Time to calculate distances: {time.time() - TIME:.3f} s")
 
     labels = np.argmin(dists, axis=1)
-    dist_max = 2  # m
-    labels[dists[np.arange(dists.shape[0]), labels] < dist_max] = -1
+    dist_max = kwargs.get("cluster_dist", np.inf)  # m
+    if dist_max != np.inf:
+        labels[dists[np.arange(dists.shape[0]), labels] > dist_max] = -1
 
     # remove clusters with fewer than 50 points
     unique_labels, counts = np.unique(labels, return_counts=True)

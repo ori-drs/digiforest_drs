@@ -77,17 +77,25 @@ class TreeSegmentation(BaseTask):
         new_cloud = o3d.t.geometry.PointCloud(cloud.select_by_mask(mask))
 
         # Downsample
-        new_cloud = new_cloud.voxel_down_sample(voxel_size=self._voxel_size)
+        # new_cloud = new_cloud.voxel_down_sample(voxel_size=self._voxel_size) # faster way
+        new_cloud, _, _ = new_cloud.to_legacy().voxel_down_sample_and_trace(
+            self._voxel_size,
+            new_cloud.get_min_bound().numpy().astype(np.float64),
+            new_cloud.get_max_bound().numpy().astype(np.float64),
+        )
+        new_cloud = o3d.t.geometry.PointCloud.from_legacy(new_cloud)
 
         return new_cloud
 
-    def clustering(self, cloud, cloth=None, recluster_flag=True):
+    def clustering(self, cloud, cloth=None, recluster_flag=True, **kwargs):
         # Run clustering
         labels = clustering.cluster(
             cloud,
             cloth=cloth,
             method=self._clustering_method,
             cluster_2d=self._cluster_2d,
+            debug_level=self._debug_level,
+            **kwargs,
         )
 
         # Get max number of labels
@@ -113,6 +121,7 @@ class TreeSegmentation(BaseTask):
                     cluster["cloud"],
                     method=self._clustering_method,
                     cluster_2d=self._cluster_2d,
+                    debug_level=self._debug_level**kwargs,
                 )
 
                 # Get max number of labels
