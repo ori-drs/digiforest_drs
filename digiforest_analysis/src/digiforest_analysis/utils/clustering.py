@@ -242,20 +242,20 @@ def voronoi(cloud, **kwargs):
             }
         )
 
-        # # visualization
-        # viz_pointcloud = o3d.geometry.PointCloud()
-        # viz_pointcloud.points = o3d.utility.Vector3dVector(cluster_points)
-        # cylinder = o3d.geometry.TriangleMesh.create_cylinder(radius=r, height=3.5)
-        # cylinder.vertices = o3d.utility.Vector3dVector(np.array(cylinder.vertices) + np.array([x_c, y_c, 3.5]))
-
     if kwargs.get("debug_level", 0) > 1:
         cylinders = []
         for axis in axes:
             cylinder_height = cluster_strip_max - cluster_strip_min
             cylinder = o3d.geometry.TriangleMesh.create_cylinder(
-                radius=axis["radius"], height=cylinder_height * 2
+                radius=axis["radius"], height=cylinder_height
             )
-            cylinder.paint_uniform_color([0, 0, 1])
+            # shift up or down depending on third component of pca. Thus the
+            # cylinder allways covers the pc
+            cylinder.vertices = o3d.utility.Vector3dVector(
+                np.array(cylinder.vertices)
+                + np.array([0, 0, cylinder_height / 2]) * np.sign(axis["rot_mat"][2, 2])
+            )
+            cylinder.paint_uniform_color([0.8, 0.8, 1])
             cylinder.vertices = o3d.utility.Vector3dVector(
                 (axis["rot_mat"].T @ np.array(cylinder.vertices).T).T + axis["center"]
             )

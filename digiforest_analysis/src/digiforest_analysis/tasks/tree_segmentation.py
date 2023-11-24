@@ -87,7 +87,7 @@ class TreeSegmentation(BaseTask):
 
         return new_cloud
 
-    def clustering(self, cloud, cloth=None, recluster_flag=True, **kwargs):
+    def clustering(self, cloud, cloth=None, **kwargs):
         # Run clustering
         labels = clustering.cluster(
             cloud,
@@ -114,7 +114,7 @@ class TreeSegmentation(BaseTask):
             extent = (
                 cluster["cloud"].get_axis_aligned_bounding_box().get_extent().numpy()
             )
-            if recluster_flag and (
+            if self._clustering_method != "voronoi" and (
                 extent[0] > self._max_cluster_size or extent[1] > self._max_cluster_size
             ):
                 labels = clustering.cluster(
