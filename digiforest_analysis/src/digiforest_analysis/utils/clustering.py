@@ -273,15 +273,21 @@ def voronoi(cloud, **kwargs):
     ).T
     normals_a /= np.linalg.norm(normals_a, axis=1)[:, None]
     normals_b = np.cross(axis_dirs, normals_a)
-    axis_pnts_to_pc = points_numpy[:, None] - axis_pnts
-    signed_dist_a = np.einsum("ijk,jk->ij", axis_pnts_to_pc, normals_a)
-    signed_dist_b = np.einsum("ijk,jk->ij", axis_pnts_to_pc, normals_b)
-    dists = np.sqrt(np.power(signed_dist_a, 2) + np.power(signed_dist_b, 2))
+
+    axis_pnts_to_origin_a = np.einsum("ij,ij->i", axis_pnts, normals_a)
+    axis_pnts_to_origin_b = np.einsum("ij,ij->i", axis_pnts, normals_b)
+    signed_dist_a_b = (
+        np.einsum("ij,kj->ik", points_numpy, normals_a) - axis_pnts_to_origin_a
+    )
+    signed_dist_b_b = (
+        np.einsum("ij,kj->ik", points_numpy, normals_b) - axis_pnts_to_origin_b
+    )
+    dists = signed_dist_a_b * signed_dist_a_b + signed_dist_b_b * signed_dist_b_b
 
     labels = np.argmin(dists, axis=1)
     dist_max = kwargs.get("cluster_dist", np.inf)  # m
     if dist_max != np.inf:
-        labels[dists[np.arange(dists.shape[0]), labels] > dist_max] = -1
+        labels[dists[np.arange(dists.shape[0]), labels] > dist_max**2] = -1
 
     # remove clusters with fewer than 50 points
     unique_labels, counts = np.unique(labels, return_counts=True)
