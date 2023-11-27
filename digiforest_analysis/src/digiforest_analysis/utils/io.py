@@ -22,19 +22,6 @@ def write(cloud, header, filename):
     write_open3d(cloud, header, filename)
 
 
-def write_pcl(cloud, header, filename):
-    # Write cloud to file
-    cloud.to_file(str.encode(filename), ascii=False)
-
-    # Update header
-    original_header = load_pcd_header(filename, binary=True)
-    for k, v in header.items():
-        original_header[k] = v
-
-    # Update file with header
-    replace_pcd_file_header(filename, original_header, binary=True)
-
-
 def write_open3d(cloud, header, filename):
     path = Path(filename)
     file_format = path.suffix
