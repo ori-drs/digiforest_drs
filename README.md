@@ -25,13 +25,6 @@ Install the dependencies:
 pip install -r requirements.txt
 ```
 
-Install `python-pcl` (custom DRS build for PCL 1.10, not available on pypi):
-
-```sh
-gdown https://drive.google.com/uc?id=1zv2OO3tSRGvyNLqUt-R-gJYHAwodA3wW
-pip install python_pcl-0.3.0rc1-cp38-cp38-linux_x86_64.whl && rm python_pcl-0.3.0rc1-cp38-cp38-linux_x86_64.whl
-```
-
 Install the automatic formatting pre-commit hooks (black and flake8), which will check the code before each commit:
 
 ```sh

@@ -25,9 +25,6 @@ def fit(X, method="lsq", **kwargs):
     if method == "lsq":
         inliers, params = fit_lsq(X, **kwargs)
 
-    elif method == "pcl_ransac":
-        inliers, params = fit_pcl(X, **kwargs)
-
     else:
         raise ValueError(f"Method [{method}] not valid")
 
@@ -191,47 +188,6 @@ def fit_lsq(X, **kwargs):
     return inliers, params
 
 
-def fit_pcl(X, **kwargs):
-    try:
-        import pcl
-    except Exception:
-        raise ImportError(
-            "PCL is not installed. Please install 'pip install python-pcl'"
-        )
-    # Get arguments
-    max_tree_diameter = kwargs.get("max_tree_diameter", 2.0)
-    outlier_thr = kwargs.get("outlier_thr", 0.01)
-
-    # Prepare data
-    X = X.copy()
-    cloud = pcl.PointCloud()
-    cloud.from_array(X.astype(np.float32))
-
-    # Estimate normals
-    ne = cloud.make_NormalEstimation()
-    tree = cloud.make_kdtree()
-    ne.set_SearchMethod(tree)
-    ne.set_KSearch(20)
-
-    # Fit
-    seg = cloud.make_segmenter_normals(ksearch=20)
-    seg.set_optimize_coefficients(True)
-    seg.set_model_type(pcl.SACMODEL_CYLINDER)
-    seg.set_normal_distance_weight(1.0)
-    seg.set_method_type(pcl.SAC_RANSAC)
-    seg.set_max_iterations(1000)
-    seg.set_distance_threshold(outlier_thr)
-    seg.set_radius_limits(0, 0.5 * max_tree_diameter)
-    try:
-        [inliers, params] = seg.segment()
-    except Exception:
-        return 0, np.zeros(7)
-
-    inliers = np.asarray(inliers)
-    # Output
-    return inliers, params
-
-
 def to_mesh(model):
     assert "position" in model
     assert "rotation" in model
@@ -313,15 +269,4 @@ if __name__ == "__main__":
         cylinder_mesh = to_mesh(model)
         o3d.visualization.draw_geometries(
             [origin, cloud.to_legacy(), cylinder_mesh], window_name="lsq"
-        )
-
-    model = fit(X, method="pcl_ransac")
-    if model["success"]:
-        print(f"Inliers: {model['inliers'].shape[0]} / {X.shape[0]}")
-        print(f"height: {model['height']}")
-        print(f"radius: {model['radius']}")
-        # View cylinder
-        cylinder_mesh = to_mesh(model)
-        o3d.visualization.draw_geometries(
-            [origin, cloud.to_legacy(), cylinder_mesh], window_name="pcl_ransac"
         )

@@ -9,7 +9,7 @@ class TreeAnalysis(BaseTask):
         super().__init__(**kwargs)
 
         self._max_dist_to_ground = kwargs.get("max_dist_to_ground", 1.0)
-        self._fitting_method = kwargs.get("fitting_method", "pcl_ransac")
+        self._fitting_method = kwargs.get("fitting_method", "lsq")
         self._breast_height = kwargs.get("breast_height", 1.3)
         self._breast_height_range = kwargs.get("breast_height_range", 0.5)
         self._max_valid_radius = kwargs.get("max_valid_radius", 0.5)

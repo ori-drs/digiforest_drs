@@ -54,7 +54,7 @@ if __name__ == "__main__":
             "debug_level": 2,  # 0: none, 1: messages, 2: 3d visualizations, 3: per-tree visualizations
             "viz_zoom": args.viz_zoom,
             "max_dist_to_ground": 1e6,
-            "fitting_method": "lsq",  # pcl_ransac, lsq
+            "fitting_method": "lsq",  # lsq
             "breast_height": 1.5,
             "breast_height_range": 1.0,
             "max_valid_radius": 0.8,
