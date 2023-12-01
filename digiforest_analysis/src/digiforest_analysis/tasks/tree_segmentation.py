@@ -339,6 +339,9 @@ if __name__ == "__main__":
         # Tree height normalize
         tree_cloud = tree["cloud"]
 
+        # retransform cloud
+        tree_cloud = io.apply_header_transform(tree_cloud, header, inverse=True)
+
         # shift to zero (debugging)
         # z_shift = cloud.point.positions[:, 2].min()
         # cloud.point.positions[:, 2] = cloud.point.positions[:, 2] - z_shift

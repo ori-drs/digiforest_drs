@@ -241,6 +241,9 @@ if __name__ == "__main__":
         i = tree["info"]["id"]
         cloud = tree["cloud"]
 
+        # retransform cloud
+        cloud = io.apply_header_transform(cloud, header, inverse=True)
+
         tree_name = f"tree_cloud_{i:04}.pcd"
         tree_cloud_filename = os.path.join(sys.argv[2], tree_name)
         header_fix = {"VIEWPOINT": header["VIEWPOINT"]}

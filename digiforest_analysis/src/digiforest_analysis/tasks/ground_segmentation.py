@@ -238,6 +238,10 @@ if __name__ == "__main__":
 
     ground_cloud, forest_cloud = app.process(cloud=cloud)
 
+    # retransform clouds
+    ground_cloud = io.apply_header_transform(ground_cloud, header, inverse=True)
+    forest_cloud = io.apply_header_transform(forest_cloud, header, inverse=True)
+
     # Write clouds
     header_fix = {"VIEWPOINT": header["VIEWPOINT"]}
     io.write(ground_cloud, header_fix, os.path.join(sys.argv[2], "ground_cloud.pcd"))

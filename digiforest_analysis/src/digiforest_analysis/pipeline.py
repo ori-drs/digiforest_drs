@@ -91,6 +91,10 @@ class Pipeline:
 
     def save_cloud(self, cloud, label="default"):
         filename = Path(self._output_dir).joinpath(label + self._cloud_format)
+
+        # retransform cloud
+        cloud = io.apply_header_transform(cloud, self._header, inverse=True)
+
         io.write(cloud, self._header, str(filename))
 
     def save_trees(self, trees, label="trees"):
@@ -101,6 +105,11 @@ class Pipeline:
             # Write clouds
             i = tree["info"]["id"]
             tree_cloud = tree["cloud"]
+
+            # retransform cloud
+            tree_cloud = io.apply_header_transform(
+                tree_cloud, self._header, inverse=True
+            )
 
             # Write cloud
             tree_cloud_filename = Path(

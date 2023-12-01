@@ -6,16 +6,33 @@ import sys
 import numpy as np
 
 
-def load(filename: str, binary=True):
+def load(filename: str, binary=True, transform_to_world=True):
     path = Path(filename)
     file_format = path.suffix
     cloud = o3d.t.io.read_point_cloud(str(path))
 
     header = load_header(filename, file_format, binary=binary, cloud=cloud)
+    if transform_to_world:
+        cloud = apply_header_transform(cloud, header, inverse=False)
+        return cloud, header
     if "offset" in header:
         cloud = cloud.translate(-header["offset"])
-
     return cloud, header
+
+
+def apply_header_transform(cloud, header: dict, inverse: bool = False):
+    assert "VIEWPOINT" in header, "No viewpoint in header"
+    header_data = [float(x) for x in header["VIEWPOINT"]]
+    location = np.array(header_data[:3])
+    rotation = np.array(header_data[3:])
+    R = o3d.geometry.TriangleMesh.get_rotation_matrix_from_quaternion(rotation)
+    if inverse:
+        cloud.rotate(R.T, center=[0, 0, 0])
+        cloud = cloud.translate(location)
+    else:
+        cloud.rotate(R, center=location)
+        cloud = cloud.translate(-location)
+    return cloud
 
 
 def write(cloud, header, filename):
