@@ -14,6 +14,8 @@ class GroundSegmentation(BaseTask):
         self._cell_size = kwargs.get("cell_size", 4.0)
         self._normal_thr = kwargs.get("normal_thr", 0.9)
         self._cloud_boxsize = kwargs.get("box_size", 80)
+        self._num_plane_support_points = kwargs.get("num_plane_support_points", 100)
+        self._num_plane_support_inliers = kwargs.get("num_plane_support_inliers", 20)
 
     def _process(self, **kwargs):
         """ "
@@ -85,14 +87,14 @@ class GroundSegmentation(BaseTask):
                 cropped_cloud = crop_box(coarse_ground_cloud, (xx, yy), self._cell_size)
 
                 # Check if there are enough points
-                if len(cropped_cloud.point.positions) > 100:
+                if len(cropped_cloud.point.positions) > self._num_plane_support_points:
                     # Run plane fitting
                     plane_model, inliers = cropped_cloud.to_legacy().segment_plane(
                         distance_threshold=self._max_distance_to_plane,
                         ransac_n=3,
                         num_iterations=1000,
                     )
-                    if len(inliers) > 20:
+                    if len(inliers) > self._num_plane_support_inliers:
                         if not ("positions" in refined_ground_cloud.point):
                             refined_ground_cloud = cropped_cloud.select_by_index(
                                 indices=inliers
@@ -151,7 +153,7 @@ class GroundSegmentation(BaseTask):
                 )
 
                 # Check if there are enough points
-                if cell_mask.numpy().sum() > 100:
+                if cell_mask.numpy().sum() > self._num_plane_support_points:
                     # Mask the cloud
                     sub_cloud = coarse_ground_cloud.select_by_mask(cell_mask)
 
@@ -162,7 +164,7 @@ class GroundSegmentation(BaseTask):
                         num_iterations=1000,
                     )
 
-                    if len(inliers) > 20:
+                    if len(inliers) > self._num_plane_support_inliers:
                         # This is ugly and requires to flatten the vector afterwards
                         cloud_inliers.extend(inliers)
 
