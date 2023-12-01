@@ -1,4 +1,4 @@
-from open3d.geometry import PointCloud
+# from open3d.geometry import PointCloud
 from digiforest_analysis.tasks import Preprocessing
 from digiforest_analysis.tasks import GroundSegmentation
 from digiforest_analysis.tasks import TreeSegmentation
@@ -113,7 +113,7 @@ class Pipeline:
             with open(str(tree_info_filename), "w") as yaml_file:
                 yaml.dump(tree["info"], yaml_file, indent=4)
 
-    def process(self, cloud: PointCloud = None, header: dict = None):
+    def process(self, cloud, header: dict = None):
         if cloud is not None and header is not None:
             self._cloud = cloud
             self._header = header

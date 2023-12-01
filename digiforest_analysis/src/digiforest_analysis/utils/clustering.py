@@ -1,11 +1,11 @@
+from functools import partial
+from multiprocessing import Pool
+import multiprocessing
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
-from digiforest_analysis.utils.timing import Timer
 from skimage.transform import hough_circle
 from sklearn.decomposition import PCA
 import open3d as o3d
-
-timer = Timer()
 
 
 def cluster(cloud, method="dbscan_open3d", **kwargs):
@@ -100,7 +100,7 @@ def kmeans_sklearn(cloud, **kwargs):
     else:
         points = cloud.point.positions.numpy()
 
-    num_clusters = 350
+    num_clusters = 50
     from sklearn.cluster import KMeans
 
     labels = KMeans(n_clusters=num_clusters, n_init="auto").fit_predict(points)
@@ -141,6 +141,52 @@ def euclidean_pcl(cloud, **kwargs):
             labels[j] = i
 
     return labels
+
+
+def pnts_to_axes_sq_dist(
+    pnts: np.ndarray, axes: np.ndarray, apply_sqrt: bool = False
+) -> np.ndarray:
+    """Calculate the distance of all point to all axes. For efficiency, two planes are
+    constructed fore every axis, which is the intersection of them.
+    The distance of a point to the axis is then the L2 norm of the individual distances
+    to both planes. This is ~5 times faster than using the cross product.
+
+    Args:
+        pnt (np.ndarray[Nx3]): point in 3D space
+        axis (np.ndarray[Mx6]): axis in 3D space (direction vector, point on axis)
+        sqrt (bool, optional): whether to return the sqrt of the squared distance.
+            Defaults to False.
+
+    Returns:
+        np.ndarray[NxM]: (squared) distance of all points to all axes
+    """
+    print("Calculating distances on thread", multiprocessing.current_process().name)
+    axis_dirs = axes[:, :3]
+    axis_dirs /= np.linalg.norm(axis_dirs, axis=1, keepdims=True)
+    axis_pnts = axes[:, 3:]
+    # TODO handle case where axis direction is in x-y-plane
+    # (extremely unlikely for digiforest)
+    normals_a = np.vstack(
+        [np.zeros_like(axis_dirs[:, 0]), axis_dirs[:, 2], -axis_dirs[:, 1]]
+    ).T
+    normals_a /= np.linalg.norm(normals_a, axis=1)[:, None]
+    normals_b = np.cross(axis_dirs, normals_a)
+
+    # hesse normal form in einstein notation
+    print("axis_pnts_to_origin_a on thread", multiprocessing.current_process().name)
+    axis_pnts_to_origin_a = np.einsum("ij,ij->i", axis_pnts, normals_a)
+    print("axis_pnts_to_origin_b on thread", multiprocessing.current_process().name)
+    axis_pnts_to_origin_b = np.einsum("ij,ij->i", axis_pnts, normals_b)
+    print("signed_dist_a on thread", multiprocessing.current_process().name)
+    signed_dist_a = np.einsum("ij,kj->ik", pnts, normals_a) - axis_pnts_to_origin_a
+    print("signed_dist_b on thread", multiprocessing.current_process().name)
+    signed_dist_b = np.einsum("ij,kj->ik", pnts, normals_b) - axis_pnts_to_origin_b
+    # this is much faster than np.power and np.sum ?! ^^
+    print("squaring on thread", multiprocessing.current_process().name)
+    sq_dists = signed_dist_a * signed_dist_a + signed_dist_b * signed_dist_b
+
+    print("Done calculating distances on", multiprocessing.current_process().name)
+    return np.sqrt(sq_dists) if apply_sqrt else sq_dists
 
 
 def voronoi(cloud, **kwargs):
@@ -264,25 +310,20 @@ def voronoi(cloud, **kwargs):
 
     # 6. Perform voronoi tesselation of point cloud without floor
     # calculate distance to each axis
-    # calculate distances as euclidean distance to two perpendicular planes
-    # meeting at the axis. This is 5 times faster than using the cross product.
-    axis_dirs = np.array([axis["axis"] for axis in axes])
-    axis_pnts = np.array([axis["center"] for axis in axes])
-    normals_a = np.vstack(
-        [np.zeros_like(axis_dirs[:, 0]), axis_dirs[:, 2], -axis_dirs[:, 1]]
-    ).T
-    normals_a /= np.linalg.norm(normals_a, axis=1)[:, None]
-    normals_b = np.cross(axis_dirs, normals_a)
-
-    axis_pnts_to_origin_a = np.einsum("ij,ij->i", axis_pnts, normals_a)
-    axis_pnts_to_origin_b = np.einsum("ij,ij->i", axis_pnts, normals_b)
-    signed_dist_a_b = (
-        np.einsum("ij,kj->ik", points_numpy, normals_a) - axis_pnts_to_origin_a
-    )
-    signed_dist_b_b = (
-        np.einsum("ij,kj->ik", points_numpy, normals_b) - axis_pnts_to_origin_b
-    )
-    dists = signed_dist_a_b * signed_dist_a_b + signed_dist_b_b * signed_dist_b_b
+    axes_np = np.array([np.hstack((a["axis"], a["center"])) for a in axes])
+    n_threads = kwargs.get("n_threads_clustering", 8)
+    print(f"Clustering with {n_threads} threads")
+    if n_threads == 1:
+        dists = pnts_to_axes_sq_dist(points_numpy, axes_np)
+    else:
+        with Pool() as pool:
+            points_grouped = np.array_split(points_numpy, n_threads, axis=0)
+            dists = pool.map(
+                partial(pnts_to_axes_sq_dist, axes=axes_np), points_grouped
+            )
+            dists = np.vstack(dists)
+    print("Clustering done")
+    # dists = pnts_to_axes_sq_dist(points_numpy, axes_np)
 
     labels = np.argmin(dists, axis=1)
     dist_max = kwargs.get("cluster_dist", np.inf)  # m

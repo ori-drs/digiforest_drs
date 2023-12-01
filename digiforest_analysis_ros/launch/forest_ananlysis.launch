@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<launch>
+  <arg name="payload_cloud_topic"     default="/local_mapping/cloud_in_local"/>
+  <!-- Optional topics -->
+
+
+  <!-- Launch mission_analysis_node -->
+  <node pkg="digiforest_analysis_ros" type="forest_analysis_node.py" name="digiforest_forest_analysis" output="screen" >
+    <param name="payload_cloud_topic"     value="$(arg payload_cloud_topic)" />
+  </node>
+
+</launch>

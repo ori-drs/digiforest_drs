@@ -74,7 +74,7 @@ class TreeSegmentation(BaseTask):
         mask = (cloud.point.normals[:, 2] >= -self._normal_thr) & (
             cloud.point.normals[:, 2] <= self._normal_thr
         )
-        new_cloud = o3d.t.geometry.PointCloud(cloud.select_by_mask(mask))
+        new_cloud = cloud.select_by_mask(mask)
 
         # Downsample
         # new_cloud = new_cloud.voxel_down_sample(voxel_size=self._voxel_size) # faster way
@@ -105,7 +105,7 @@ class TreeSegmentation(BaseTask):
         clusters = []
         for i in range(num_labels):
             mask = labels == i
-            seg_cloud = o3d.t.geometry.PointCloud(cloud.select_by_mask(mask))
+            seg_cloud = cloud.select_by_mask(mask)
             clusters.append({"cloud": seg_cloud, "info": {"id": i}})
 
         refined_clusters = []
@@ -121,28 +121,26 @@ class TreeSegmentation(BaseTask):
                     cluster["cloud"],
                     method=self._clustering_method,
                     cluster_2d=self._cluster_2d,
-                    debug_level=self._debug_level**kwargs,
+                    debug_level=self._debug_level,
+                    **kwargs,
                 )
 
                 # Get max number of labels
                 num_labels = labels.max() + 1
                 for i in range(num_labels):
                     mask = labels == i
-                    seg_cloud = o3d.t.geometry.PointCloud(
-                        cluster["cloud"].select_by_mask(mask)
-                    )
-                    color = self._cmap[idx % self._ncolors]
+                    seg_cloud = cluster["cloud"].select_by_mask(mask)
+                    color = np.array(self._cmap[idx % self._ncolors]).astype(np.float32)
                     refined_clusters.append(
                         {"cloud": seg_cloud, "info": {"id": idx, "color": color}}
                     )
                     idx += 1
             else:
-                color = self._cmap[idx % self._ncolors]
+                color = np.array(self._cmap[idx % self._ncolors]).astype(np.float32)
                 refined_clusters.append(
                     {"cloud": cluster["cloud"], "info": {"id": idx, "color": color}}
                 )
                 idx += 1
-
         return refined_clusters
 
     def filter_tree_clusters(self, clusters):
@@ -227,6 +225,8 @@ class TreeSegmentation(BaseTask):
 
     def compute_pca(self, cluster):
         cluster_np = cluster.point.positions.numpy()
+        if cluster_np.shape[0] < 3:
+            return np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
         # Center the data by subtracting the mean
         mean = np.mean(cluster_np, axis=0)
         centered_data = cluster_np - mean
