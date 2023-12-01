@@ -21,7 +21,7 @@ def load(filename: str, binary=True, transform_to_world=True):
 
 
 def apply_header_transform(cloud, header: dict, inverse: bool = False):
-    assert "VIEWPOINT" in header, "No viewpoint in header"
+    assert "VIEWPOINT" in header, "No viewpoint in header. Cannot apply transform"
     header_data = [float(x) for x in header["VIEWPOINT"]]
     location = np.array(header_data[:3])
     rotation = np.array(header_data[3:])
