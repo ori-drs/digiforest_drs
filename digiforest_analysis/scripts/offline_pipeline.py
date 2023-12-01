@@ -37,6 +37,8 @@ if __name__ == "__main__":
             "cell_size": 4.0,
             "normal_thr": 0.9,
             "box_size": 80,
+            "num_plane_support_points": 100,
+            "num_plane_support_inliers": 20,
         },
         "tree_segmentation": {
             "debug_level": 2,  # 0: none, 1: messages, 2: 3d visualizations, 3: per-tree visualizations
