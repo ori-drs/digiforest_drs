@@ -52,18 +52,21 @@ class TreeSegmentation(BaseTask):
         # Compute cluster attributes
         clusters = self.compute_clusters_info(clusters)
 
-        # Filter out implausible clusters
-        filtered_clusters = self.filter_tree_clusters(clusters)
+        # Filter out implausible clusters when not using voronoi
+        if self._clustering_method != "voronoi":
+            filtered_clusters = self.filter_tree_clusters(clusters)
 
-        if self._debug_level > 0:
-            num_filtered_clusters = len(clusters) - len(filtered_clusters)
-            print(f"Filtered out {num_filtered_clusters} clusters.")
+            if self._debug_level > 0:
+                num_filtered_clusters = len(clusters) - len(filtered_clusters)
+                print(f"Filtered out {num_filtered_clusters} clusters.")
+
+            clusters = filtered_clusters
 
         # Debug visualizations
         if self._debug_level > 1:
-            self.debug_visualizations(cloud, filtered_clusters)
+            self.debug_visualizations(cloud, clusters)
 
-        return filtered_clusters
+        return clusters
 
     @property
     def rejected_clusters(self):
@@ -89,7 +92,7 @@ class TreeSegmentation(BaseTask):
 
     def clustering(self, cloud, cloth=None, **kwargs):
         # Run clustering
-        labels = clustering.cluster(
+        return_value = clustering.cluster(
             cloud,
             cloth=cloth,
             method=self._clustering_method,
@@ -97,6 +100,10 @@ class TreeSegmentation(BaseTask):
             debug_level=self._debug_level,
             **kwargs,
         )
+        if self._clustering_method == "voronoi":
+            labels, axes = return_value
+        else:
+            labels = return_value
 
         # Get max number of labels
         num_labels = labels.max() + 1
@@ -106,42 +113,50 @@ class TreeSegmentation(BaseTask):
         for i in range(num_labels):
             mask = labels == i
             seg_cloud = cloud.select_by_mask(mask)
-            clusters.append({"cloud": seg_cloud, "info": {"id": i}})
+            cluster = {"cloud": seg_cloud, "info": {"id": i}}
+            if self._clustering_method == "voronoi":
+                color = np.array(self._cmap[i % self._ncolors]).astype(np.float32)
+                cluster["info"]["color"] = color
+                cluster["info"]["axis"] = axes[i]
+            clusters.append(cluster)
 
-        refined_clusters = []
-        idx = 0
-        for cluster in clusters:
-            extent = (
-                cluster["cloud"].get_axis_aligned_bounding_box().get_extent().numpy()
-            )
-            if self._clustering_method != "voronoi" and (
-                extent[0] > self._max_cluster_size or extent[1] > self._max_cluster_size
-            ):
-                labels = clustering.cluster(
-                    cluster["cloud"],
-                    method=self._clustering_method,
-                    cluster_2d=self._cluster_2d,
-                    debug_level=self._debug_level,
-                    **kwargs,
+        if self._clustering_method == "voronoi":
+            return clusters
+        else:
+            # recluster for non-voronoi methods if cluster is too big
+            refined_clusters = []
+            idx = 0
+            for idx, cluster in clusters:
+                extent = (
+                    cluster["cloud"]
+                    .get_axis_aligned_bounding_box()
+                    .get_extent()
+                    .numpy()
                 )
-
-                # Get max number of labels
-                num_labels = labels.max() + 1
-                for i in range(num_labels):
-                    mask = labels == i
-                    seg_cloud = cluster["cloud"].select_by_mask(mask)
-                    color = np.array(self._cmap[idx % self._ncolors]).astype(np.float32)
-                    refined_clusters.append(
-                        {"cloud": seg_cloud, "info": {"id": idx, "color": color}}
+                if (
+                    extent[0] > self._max_cluster_size
+                    or extent[1] > self._max_cluster_size
+                ):
+                    labels = clustering.cluster(
+                        cluster["cloud"],
+                        method=self._clustering_method,
+                        cluster_2d=self._cluster_2d,
+                        debug_level=self._debug_level,
+                        **kwargs,
                     )
-                    idx += 1
-            else:
-                color = np.array(self._cmap[idx % self._ncolors]).astype(np.float32)
-                refined_clusters.append(
-                    {"cloud": cluster["cloud"], "info": {"id": idx, "color": color}}
-                )
-                idx += 1
-        return refined_clusters
+
+                    # Get max number of labels
+                    num_labels = labels.max() + 1
+                    for i in range(num_labels):
+                        mask = labels == i
+                        seg_cloud = cluster["cloud"].select_by_mask(mask)
+                        color = np.array(self._cmap[idx % self._ncolors]).astype(
+                            np.float32
+                        )
+                        cluster["info"]["color"] = color
+                        refined_clusters.append(cluster)
+                        idx += 1
+            return refined_clusters
 
     def filter_tree_clusters(self, clusters):
         filtered_clusters = []
@@ -226,7 +241,7 @@ class TreeSegmentation(BaseTask):
     def compute_pca(self, cluster):
         cluster_np = cluster.point.positions.numpy()
         if cluster_np.shape[0] < 3:
-            return np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
+            return np.eye(3)
         # Center the data by subtracting the mean
         mean = np.mean(cluster_np, axis=0)
         centered_data = cluster_np - mean
@@ -269,7 +284,7 @@ class TreeSegmentation(BaseTask):
 
             # # Compute DBH
             # dbh = self.compute_dbh(c["cloud"])
-            clusters[i]["info"]["dbh"] = 0.5
+            clusters[i]["info"]["dbh"] = 0.5  # TODO: implement this
 
         return clusters
 

@@ -89,9 +89,6 @@ class ForestAnalysis:
         mesh_msg.type = Marker.TRIANGLE_LIST
         mesh_msg.action = Marker.ADD
 
-        # mesh_msg.pose.position.x = location[0]
-        # mesh_msg.pose.position.y = location[1]
-        # mesh_msg.pose.position.z = location[2]
         mesh_msg.pose.orientation.w = 1.0
         mesh_msg.scale.x = 1.0
         mesh_msg.scale.y = 1.0
@@ -101,8 +98,6 @@ class ForestAnalysis:
         mesh_msg.color.g = 102 / 255.0
         mesh_msg.color.b = 87 / 255.0
 
-        # vertices = np.array([[0,0,0], [0,0,1], [0,1,0], [0,1,1], [1,0,0], [1,0,1], [1,1,0], [1,1,1]]) * 1. + vertices[0]
-        # triangles = np.array([[0,1,2], [1,2,3], [4,5,6], [5,6,7], [0,1,4], [1,4,5], [2,3,6], [3,6,7], [0,2,4], [2,4,6], [1,3,5], [3,5,7]])
         mesh_msg.points = [
             Point(x, y, z) for x, y, z in vertices[triangles].reshape(-1, 3).tolist()
         ]
@@ -118,23 +113,6 @@ class ForestAnalysis:
             color = np.floor(np.array([color[2], color[1], color[0], 0.0]) * 255)
             color = np.frombuffer(color.astype(np.uint8).tobytes(), dtype=np.float32)
             colors[i] = color
-
-        # # Create a PointCloud2 message
-        # cloud = PointCloud2()
-        # cloud.header.stamp = rospy.Time.now()
-        # cloud.header.frame_id = self.last_header.frame_id
-
-        # # Set pointcloud2 fields
-        # cloud.width = sum([cloud.shape[0] for cloud in clouds])
-        # cloud.height = 1
-        # cloud.is_dense = True
-        # cloud.point_step = 16
-        # cloud.fields = [
-        #     PointField('x', 0, PointField.FLOAT32, 1),
-        #     PointField('y', 4, PointField.FLOAT32, 1),
-        #     PointField('z', 8, PointField.FLOAT32, 1),
-        #     PointField('rgb', 12, PointField.FLOAT32, 1),
-        # ]
 
         # Convert numpy arrays to pointcloud2 data
         header = rospy.Header()

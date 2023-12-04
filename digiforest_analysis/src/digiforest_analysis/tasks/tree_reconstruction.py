@@ -39,9 +39,9 @@ class Circle:
         search_radius: float = None,
         entropy_weighting: float = 10.0,
         circle_height: float = 0.0,
-        return_pixels: bool = False,
+        return_pixels_and_votes: bool = False,
         **kwargs,
-    ) -> "Circle":
+    ) -> Tuple["Circle", np.ndarray, np.ndarray]:
         """This function fits circles to the points in a slice using the hough
         transform. If both previous_center and search_radius are given, the search
         for the circle center is constrained to a circle around the previous center.
@@ -65,12 +65,14 @@ class Circle:
                 with noise at small radii. Defaults to 10.0.
             circle_height (float, optional): height of the slice in m.
                 Defaults to 0.0.
-            return_pixels (bool, optional): If True, an array containing the votes is
-                returned additionally. Useful for debugging. Defaults to False.
+            return_pixels_and_votes (bool, optional): If True, an array containing the
+                pixels aggregating the points and the votes corresponding to the optimal
+                radius casted are returned additionally. Useful for debugging.
+                Defaults to False.
 
         Returns:
             Circle: circle object and if wanted the pixels aggregating the
-                points.
+                points and the voting mask of the best radius.
         """
         # construct 2D grid with pixel length of grid_res
         # bounding the point cloud of the current slice
@@ -186,8 +188,8 @@ class Circle:
         r = try_radii[i_rad] * grid_res
         circ = cls((x_c, y_c, circle_height), r)
 
-        if return_pixels:
-            return circ, pixels
+        if return_pixels_and_votes:
+            return circ, pixels, hough_res[i_rad]
         else:
             return circ
 
