@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # author: Leonard Freissmuth
 
+from typing import List
 import numpy as np
 import open3d as o3d
 from multiprocessing import Pool
@@ -13,6 +14,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
 
 from digiforest_analysis.tasks.tree_segmentation import TreeSegmentation
+from digiforest_analysis.tasks.ground_segmentation import GroundSegmentation
 from digiforest_analysis.tasks.tree_reconstruction import Tree
 from digiforest_analysis.utils.timing import Timer
 
@@ -21,7 +23,10 @@ class ForestAnalysis:
     def __init__(self) -> None:
         self.read_params()
         self.setup_ros()
-        self.ts = TreeSegmentation(clustering_method="voronoi")
+        self.ts = TreeSegmentation(
+            clustering_method=self._clustering_method,
+            debug_level=self._debug_level,
+        )
         self.last_header = None
 
     def read_params(self):
@@ -34,8 +39,43 @@ class ForestAnalysis:
         self._tree_meshes_topic = rospy.get_param(
             "~tree_meshes_topic", "/realtime_trees/tree_meshes"
         )
+        self._debug_clusters_topic = rospy.get_param(
+            "~debug_clusters_topic", "/realtime_trees/debug/clusters"
+        )
+        self._debug_cluster_labels_topic = rospy.get_param(
+            "~debug_cluster_labels_topic", "/realtime_trees/debug/cluster_labels"
+        )
 
+        self._debug_level = rospy.get_param("~debug_level", 0)
         self._base_frame_id = rospy.get_param("~base_frame_id", "base")
+
+        # Ground Segmentation
+        self._ground_segmentation_enabled = rospy.get_param(
+            "~ground_segmentation_enabled", False
+        )
+        self._ground_segmentation_method = rospy.get_param(
+            "~ground_segmentation_method", "csf"
+        )
+        self._ground_segmentation_cell_size = rospy.get_param(
+            "~ground_segmentation_cell_size", 2
+        )
+
+        # Clustering
+        self._clustering_method = rospy.get_param("~clustering_method", "voronoi")
+        self._clustering_hough_filter_radius = rospy.get_param(
+            "~clustering_hough_filter_radius", 0.1
+        )
+        self._clustering_crop_lower_bound = rospy.get_param(
+            "~clustering_crop_lower_bound", 5.0
+        )
+        self._clustering_crop_upper_bound = rospy.get_param(
+            "~clustering_crop_upper_bound", 8.0
+        )
+        self._clustering_max_cluster_radius = rospy.get_param(
+            "~clustering_max_cluster_radius", 3.0
+        )
+        self._clustering_n_threads = rospy.get_param("~clustering_n_threads", 8)
+        self._clustering_cluster_2d = rospy.get_param("~clustering_cluster_2d", False)
 
         # Internals
         self._tf_buffer = None
@@ -53,11 +93,15 @@ class ForestAnalysis:
 
         # Publishers
         self._pub_tree_meshes = rospy.Publisher(
-            self._tree_meshes_topic, MarkerArray, queue_size=1
+            self._tree_meshes_topic, MarkerArray, queue_size=1, latch=True
         )
 
         self._pub_debug_clusters = rospy.Publisher(
-            "/realtime_trees/debug/clusters", PointCloud2, queue_size=1
+            self._debug_clusters_topic, PointCloud2, queue_size=1, latch=True
+        )
+
+        self._pub_cluster_labels = rospy.Publisher(
+            self._debug_cluster_labels_topic, MarkerArray, queue_size=1, latch=True
         )
 
     def pc2_to_o3d(self, cloud: PointCloud2):
@@ -80,6 +124,7 @@ class ForestAnalysis:
     ) -> Marker:
         if vertices.shape[0] == 0:
             return None
+
         mesh_msg = Marker()
 
         mesh_msg.header.frame_id = self._base_frame_id
@@ -138,6 +183,40 @@ class ForestAnalysis:
         # Publish the pointcloud
         cloud = point_cloud2.create_cloud(header, fields, points)
         self._pub_debug_clusters.publish(cloud)
+        if self._debug_level > 0:
+            print(
+                f"Published {len(clouds)} colored pointclouds on the topic {self._debug_clusters_topic}"
+            )
+
+    def publish_cluster_labels(self, labels: List[str], locations: List[np.ndarray]):
+        marker_array = MarkerArray()
+        for i, (label, location) in enumerate(zip(labels, locations)):
+            marker = Marker()
+            marker.header.frame_id = self.last_header.frame_id
+            marker.header.stamp = self.last_header.stamp
+            marker.ns = "realtime_trees"
+            marker.id = i
+            marker.type = Marker.TEXT_VIEW_FACING
+            marker.action = Marker.ADD
+            marker.pose.position.x = location[0]
+            marker.pose.position.y = location[1]
+            marker.pose.position.z = location[2]
+            marker.pose.orientation.w = 1.0
+            marker.scale.x = 0.5
+            marker.scale.y = 0.5
+            marker.scale.z = 0.5
+            marker.color.a = 1.0
+            marker.color.r = 1.0
+            marker.color.g = 1.0
+            marker.color.b = 1.0
+            marker.text = label
+            marker_array.markers.append(marker)
+
+        self._pub_cluster_labels.publish(marker_array)
+        if self._debug_level > 0:
+            print(
+                f"Published {len(labels)} cluster labels on the topic {self._debug_cluster_labels_topic}"
+            )
 
     def payload_cloud_callback(self, data: PointCloud2):
         print("Received payload cloud")
@@ -164,19 +243,42 @@ class ForestAnalysis:
             with timer("conversion"):
                 cloud = self.pc2_to_o3d(data)
 
+            if self._ground_segmentation_enabled:
+                with timer("cloth"):
+                    ground_seg = GroundSegmentation(
+                        debug_level=self._debug_level,
+                        method=self._ground_segmentation_method,
+                        cell_size=self._ground_segmentation_cell_size,
+                    )
+                    _, _, cloth = ground_seg.process(cloud=cloud, export_cloth=True)
+            else:
+                cloth = None
+
             with timer("clusterting"):
-                clusters = self.ts.process(cloud=cloud, cluster_dist=2)
+                clusters = self.ts.process(
+                    cloud=cloud,
+                    cloth=cloth,
+                    hough_filter_radius=self._clustering_hough_filter_radius,
+                    crop_lower_bound=self._clustering_crop_lower_bound,
+                    crop_upper_bound=self._clustering_crop_upper_bound,
+                    max_cluster_radius=self._clustering_max_cluster_radius,
+                    n_threads=self._clustering_n_threads,
+                )
                 clouds = [c["cloud"].point.positions.numpy() for c in clusters]
                 colors = [c["info"]["color"] for c in clusters]
+                # colors = [np.random.rand(3) for c in clusters]
                 self.publish_colored_pointclouds(clouds, colors)
+                self.publish_cluster_labels(
+                    labels=[f"tree{str(c['info']['id']).zfill(3)}" for c in clusters],
+                    locations=[c["info"]["axis"]["center"] for c in clusters],
+                )
 
             with timer("fitting"):
                 trees = []
-                with Pool(processes=8) as pool:
-                    all_points = [
-                        cluster["cloud"].point.positions.numpy() for cluster in clusters
-                    ]
-                    trees = pool.map(Tree.from_cloud, all_points)
+                with Pool(processes=4) as pool:
+                    trees = pool.map(Tree.from_cluster, clusters)
+                # filter trees without circles
+                trees = [t for t in trees if len(t.circles)]
 
             with timer("meshing"):
                 mesh_array = MarkerArray()
@@ -186,7 +288,7 @@ class ForestAnalysis:
                     mesh_msg = self.genereate_mesh_msg(verts, tris)
                     if mesh_msg is not None:
                         mesh_array.markers.append(mesh_msg)
-
-            self._pub_tree_meshes.publish(mesh_array)
+                self._pub_tree_meshes.publish(mesh_array)
 
         print(timer)
+        print(f"Done: Found {len(trees)} trees")

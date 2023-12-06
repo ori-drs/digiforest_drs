@@ -45,14 +45,16 @@ def plot_mesh(vertices, triangles, points):
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
+    xlim = ax.get_xlim3d()
+    ylim = ax.get_ylim3d()
+    zlim = ax.get_zlim3d()
+    ax.set_box_aspect((xlim[1] - xlim[0], ylim[1] - ylim[0], zlim[1] - zlim[0]))
     plt.show()
 
 
 if __name__ == "__main__":
     # pcd_file = "/home/ori/logs/logs_evo_finland/exp16/combined_cloud.pcd"
-    pcd_file = (
-        pcd_file
-    ) = "/home/ori/logs/logs_evo_finland/exp01/2023-05-01-14-01-05-exp01/payload_clouds/cloud_1682946124_761436000.pcd"
+    pcd_file = "/home/ori/logs/logs_evo_finland/exp01/2023-05-01-14-01-05-exp01/payload_clouds/cloud_1682946124_761436000.pcd"
     cloud, header = load(pcd_file, binary=True)
     if "VIEWPOINT" in header:
         header_data = [float(x) for x in header["VIEWPOINT"]]
@@ -67,22 +69,28 @@ if __name__ == "__main__":
     tree_seg = ts.TreeSegmentation(debug_level=0, clustering_method="voronoi")
     clusters = tree_seg.process(cloud=cloud, cluster_dist=2)
 
+    # import pickle
     # for i, cluster in enumerate(clusters):
+    #     path = f"/home/ori/git/realtime-trees/single_trees/clustering_2/tree{str(i).zfill(3)}"
     #     # save pointcloud to disk as las
     #     o3d.io.write_point_cloud(
-    #         f"/home/ori/git/realtime-trees/single_trees/clustering_map/{str(i).zfill(3)}tree.pcd",
+    #         path + ".pcd",
     #         cluster["cloud"].to_legacy(),
     #     )
+    #     with open(path + ".pkl", 'wb') as file:
+    #         pickle.dump(cluster, file)
 
-    all_points_list = [cluster["cloud"].point.positions.numpy() for cluster in clusters]
     with Pool() as pool:
-        trees = pool.map(Tree.from_cloud, all_points_list)
+        trees = pool.map(Tree.from_cluster, clusters)
 
-    for tree, points in zip(trees, all_points_list):
-        verts, tris = tree.generate_mesh()
-        if len(verts) == 0 or len(tris) == 0:
-            continue
-        plot_mesh(verts, tris, points)
-        print(
-            "Tree mesh has {} vertices and {} triangles".format(len(verts), len(tris))
-        )
+    print(np.array([1 if len(t.circles) else 0 for t in trees]).sum())
+    # for tree, points in zip(trees, [clusters["cloud"].point.positions.numpy() for clusters in clusters]):
+    #     verts, tris = tree.generate_mesh()
+    #     if len(verts) == 0 or len(tris) == 0:
+    #         continue
+    #     plot_mesh(verts, tris, points)
+    #     print(
+    #         "Tree mesh has {} vertices and {} triangles".format(len(verts), len(tris))
+    #     )
+
+    print("Done!")

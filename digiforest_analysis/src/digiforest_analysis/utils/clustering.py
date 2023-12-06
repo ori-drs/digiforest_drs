@@ -145,7 +145,7 @@ def euclidean_pcl(cloud, **kwargs):
 
 
 def pnts_to_axes_sq_dist(
-    pnts: np.ndarray, axes: np.ndarray, apply_sqrt: bool = False
+    pnts: np.ndarray, axes: np.ndarray, apply_sqrt: bool = False, debug_level: int = 0
 ) -> np.ndarray:
     """Calculate the distance of all point to all axes. For efficiency, two planes are
     constructed fore every axis, which is the intersection of them.
@@ -157,11 +157,13 @@ def pnts_to_axes_sq_dist(
         axis (np.ndarray[Mx6]): axis in 3D space (direction vector, point on axis)
         sqrt (bool, optional): whether to return the sqrt of the squared distance.
             Defaults to False.
+        debug_level (int, optional): verbosity level. Defaults to 0.
 
     Returns:
         np.ndarray[NxM]: (squared) distance of all points to all axes
     """
-    print("Calculating distances on thread", multiprocessing.current_process().name)
+    if debug_level > 0:
+        print("Start calculating distances on ", multiprocessing.current_process().name)
     axis_dirs = axes[:, :3]
     axis_dirs /= np.linalg.norm(axis_dirs, axis=1, keepdims=True)
     axis_pnts = axes[:, 3:]
@@ -174,27 +176,46 @@ def pnts_to_axes_sq_dist(
     normals_b = np.cross(axis_dirs, normals_a)
 
     # hesse normal form in einstein notation
-    print("axis_pnts_to_origin_a on thread", multiprocessing.current_process().name)
+    if debug_level > 0:
+        print("axis_pnts_to_origin_a on thread", multiprocessing.current_process().name)
     axis_pnts_to_origin_a = np.einsum("ij,ij->i", axis_pnts, normals_a)
-    print("axis_pnts_to_origin_b on thread", multiprocessing.current_process().name)
+    if debug_level > 0:
+        print("axis_pnts_to_origin_b on thread", multiprocessing.current_process().name)
     axis_pnts_to_origin_b = np.einsum("ij,ij->i", axis_pnts, normals_b)
-    print("signed_dist_a on thread", multiprocessing.current_process().name)
+    if debug_level > 0:
+        print("signed_dist_a on thread", multiprocessing.current_process().name)
     signed_dist_a = np.einsum("ij,kj->ik", pnts, normals_a) - axis_pnts_to_origin_a
-    print("signed_dist_b on thread", multiprocessing.current_process().name)
+    if debug_level > 0:
+        print("signed_dist_b on thread", multiprocessing.current_process().name)
     signed_dist_b = np.einsum("ij,kj->ik", pnts, normals_b) - axis_pnts_to_origin_b
     # this is much faster than np.power and np.sum ?! ^^
-    print("squaring on thread", multiprocessing.current_process().name)
+    if debug_level > 0:
+        print("squaring on thread", multiprocessing.current_process().name)
     sq_dists = signed_dist_a * signed_dist_a + signed_dist_b * signed_dist_b
 
-    print("Done calculating distances on", multiprocessing.current_process().name)
+    if debug_level > 0:
+        print("Done calculating distances on", multiprocessing.current_process().name)
     return np.sqrt(sq_dists) if apply_sqrt else sq_dists
 
 
-def voronoi(cloud, filter_radius: float = 0.1, **kwargs):
+def voronoi(  # noqa
+    cloud,
+    cloth: np.ndarray = None,
+    hough_filter_radius: float = 0.1,
+    crop_lower_bound: float = 5.0,
+    crop_upper_bound: float = 8.0,
+    max_cluster_radius: float = np.inf,
+    n_threads: int = 8,
+    debug_level: int = 0,
+    cluster_2d: bool = False,
+):
+    if cluster_2d:
+        # TODO: implement 2D clustering
+        raise NotImplementedError("2D clustering not implemented for voronoi")
+
     labels = -np.ones(cloud.point.positions.shape[0], dtype=np.int32)
 
     # 1. Normalize heights
-    cloth = kwargs.get("cloth", None)
     if cloth is not None:
         interpolator = RegularGridInterpolator(
             points=(cloth[:, 0, 1], cloth[0, :, 0]),
@@ -207,11 +228,9 @@ def voronoi(cloud, filter_radius: float = 0.1, **kwargs):
         cloud.point.positions[:, 2] -= heights.astype(np.float32)
 
     # 2. Crop point cloud between cluster_strip_min and cluster_strip_max
-    cluster_strip_min = kwargs.get("cluster_strip_min", 5.0)
-    cluster_strip_max = kwargs.get("cluster_strip_max", 8.0)
     points_numpy = cloud.point.positions.numpy()
     cluster_strip_mask = np.logical_and(
-        points_numpy[:, 2] > cluster_strip_min, points_numpy[:, 2] < cluster_strip_max
+        points_numpy[:, 2] > crop_lower_bound, points_numpy[:, 2] < crop_upper_bound
     )
     cluster_strip = cloud.select_by_mask(cluster_strip_mask.astype(bool))
 
@@ -234,22 +253,22 @@ def voronoi(cloud, filter_radius: float = 0.1, **kwargs):
         cluster_points = cluster_points.point.positions.numpy()
         # 4.1. Remove clusters with fewer than 100 points
         if cluster_points.shape[0] < 100:
-            if kwargs.get("debug_level", 0) > 0:
+            if debug_level > 0:
                 print("Too few points")
             continue
 
         # 4.2. remove clsters not extending between cluster_strip_min and cluster_strip_max
         if (
-            np.min(cluster_points[:, 2]) > 1.05 * cluster_strip_min
-            or np.max(cluster_points[:, 2]) < 0.95 * cluster_strip_max
+            np.min(cluster_points[:, 2]) > 1.05 * crop_lower_bound
+            or np.max(cluster_points[:, 2]) < 0.95 * crop_upper_bound
         ):
-            if kwargs.get("debug_level", 0) > 0:
+            if debug_level > 0:
                 print(
                     "Cluster not extending between cluster_strip_min and cluster_strip_max"
                 )
             continue
         # 4.2. Find circles in projection of cloud onto x-y plane
-        circ, _, votes = Circle.from_cloud_hough(
+        circ, _, votes, _ = Circle.from_cloud_hough(
             points=cluster_points,
             grid_res=0.02,
             min_radius=0.05,
@@ -257,23 +276,26 @@ def voronoi(cloud, filter_radius: float = 0.1, **kwargs):
             return_pixels_and_votes=True,
         )
         if votes.max() < 0.1:
-            if kwargs.get("debug_level", 0) > 0:
+            if debug_level > 0:
                 print("max_vote < 0.1")
             continue
 
-        if kwargs.get("debug_level", 0) > 0:
+        if debug_level > 0:
             print(
                 f"Center coordinates of hough circle: ({circ.x}, {circ.y}), Radius: {circ.radius}, Maximum vote: {votes.max()}"
             )
 
         # 4.3. Remove points that are not close to the circle
         dist = circ.get_distance(cluster_points)
-        cluster_points = cluster_points[dist < filter_radius]
+        cluster_points = cluster_points[dist < hough_filter_radius]
 
         # 5. Fit tree axes to clusters using PCA
         pca = PCA(n_components=3)
         pca.fit(cluster_points)
         tree_direction = pca.components_[0]
+        rot_mat = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]]) @ pca.components_
+        if rot_mat[2, 2] < 0:
+            rot_mat[:, 1:] *= -1  # make sure the z component of the pca is positive
 
         # convert cluster_points into open3d point cloud and give a random color
         cluster_points = o3d.geometry.PointCloud(
@@ -282,18 +304,18 @@ def voronoi(cloud, filter_radius: float = 0.1, **kwargs):
         cluster_points.paint_uniform_color(np.random.rand(3))
         axis_dict = {
             "direction": tree_direction,
-            "center": np.array([circ.x, circ.y, cluster_strip_min]),
+            "center": np.array([circ.x, circ.y, crop_lower_bound]),
             "radius": circ.radius,
-            "rot_mat": np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]]) @ pca.components_,
+            "rot_mat": rot_mat,
         }
-        if kwargs.get("debug_level", 0) > 1:
+        if debug_level > 1:
             axis_dict["cloud"] = cluster_points
         axes.append(axis_dict)
 
-    if kwargs.get("debug_level", 0) > 1:
+    if debug_level > 1:
         cylinders = []
         for axis in axes:
-            cylinder_height = cluster_strip_max - cluster_strip_min
+            cylinder_height = crop_upper_bound - crop_lower_bound
             cylinder = o3d.geometry.TriangleMesh.create_cylinder(
                 radius=axis["radius"], height=cylinder_height
             )
@@ -312,8 +334,7 @@ def voronoi(cloud, filter_radius: float = 0.1, **kwargs):
 
     # 6. Perform voronoi tesselation of point cloud without floor
     # calculate distance to each axis
-    axes_np = np.array([np.hstack((a["axis"], a["center"])) for a in axes])
-    n_threads = kwargs.get("n_threads_clustering", 8)
+    axes_np = np.array([np.hstack((a["direction"], a["center"])) for a in axes])
     print(f"Clustering with {n_threads} threads")
     if n_threads == 1:
         dists = pnts_to_axes_sq_dist(points_numpy, axes_np)
@@ -321,16 +342,17 @@ def voronoi(cloud, filter_radius: float = 0.1, **kwargs):
         with Pool() as pool:
             points_grouped = np.array_split(points_numpy, n_threads, axis=0)
             dists = pool.map(
-                partial(pnts_to_axes_sq_dist, axes=axes_np), points_grouped
+                partial(pnts_to_axes_sq_dist, axes=axes_np, debug_level=debug_level),
+                points_grouped,
             )
             dists = np.vstack(dists)
-    print("Clustering done")
+    if debug_level > 0:
+        print("Clustering done")
     # dists = pnts_to_axes_sq_dist(points_numpy, axes_np)
 
     labels = np.argmin(dists, axis=1)
-    dist_max = kwargs.get("cluster_dist", np.inf)  # m
-    if dist_max != np.inf:
-        labels[dists[np.arange(dists.shape[0]), labels] > dist_max**2] = -1
+    if max_cluster_radius != np.inf:
+        labels[dists[np.arange(dists.shape[0]), labels] > max_cluster_radius**2] = -1
 
     # remove clusters with fewer than 50 points
     filtered_axes = []

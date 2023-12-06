@@ -41,7 +41,7 @@ class Circle:
         circle_height: float = 0.0,
         return_pixels_and_votes: bool = False,
         **kwargs,
-    ) -> Tuple["Circle", np.ndarray, np.ndarray]:
+    ) -> Tuple["Circle", np.ndarray, np.ndarray, np.ndarray]:
         """This function fits circles to the points in a slice using the hough
         transform. If both previous_center and search_radius are given, the search
         for the circle center is constrained to a circle around the previous center.
@@ -72,7 +72,9 @@ class Circle:
 
         Returns:
             Circle: circle object and if wanted the pixels aggregating the
-                points and the voting mask of the best radius.
+                points and the entropy_weighted hough votes and the penalty factor.
+                The unweighted votes can be obtained by multiplying weighted votes with
+                the factor.
         """
         # construct 2D grid with pixel length of grid_res
         # bounding the point cloud of the current slice
@@ -122,7 +124,10 @@ class Circle:
         # TODO unequally space tryradii for efficiency
         try_radii = np.arange(min_radius_px, max_radius_px)
         if try_radii.shape[0] == 0:
-            return 0, 0, 0, pixels
+            if return_pixels_and_votes:
+                return None, None, None, None
+            else:
+                return None
         hough_res = hough_circle(pixels, try_radii)
 
         # weigh each radius by the entropy of the top 10 hough votes for that radius
@@ -146,7 +151,10 @@ class Circle:
             mask = ~np.logical_and(radius_mask, votes_mask)
             if not np.any(mask):
                 # return if there's no radii left
-                return 0, 0, 0, None
+                if return_pixels_and_votes:
+                    return None, None, None, None
+                else:
+                    return None
             hough_res = hough_res[mask]
             try_radii = try_radii[mask]
 
@@ -189,7 +197,7 @@ class Circle:
         circ = cls((x_c, y_c, circle_height), r)
 
         if return_pixels_and_votes:
-            return circ, pixels, hough_res[i_rad]
+            return circ, pixels, hough_res[i_rad], penalty[i_rad, None, None]
         else:
             return circ
 
@@ -220,6 +228,7 @@ class Circle:
         S_uv = np.sum(u * v)
         S_uuu_uvv = np.sum(np.power(u, 3) + u * np.power(v, 2))
         S_vvv_vuu = np.sum(np.power(v, 3) + v * np.power(u, 2))
+
         # calculate circle center in normalized coordinates and radius
         v_c = (S_uuu_uvv / (2 * S_uu) - S_vvv_vuu / (2 * S_uv)) / (
             S_uv / S_uu - S_vv / S_uv + 1e-12
@@ -459,6 +468,20 @@ class Circle:
 
         return vertices, tri_indices
 
+    def __str__(self) -> str:
+        return f"Circle: center: {self.center}, radius: {self.radius}, normal: {self.rot_mat[:, 2]}"
+
+    def apply_transform(self, translation: np.ndarray, rotation: np.ndarray):
+        if rotation.shape[0] == 4:
+            rot_mat = Rotation.from_quat(rotation).as_matrix()
+        elif rotation.shape == (3, 3):
+            rot_mat = rotation
+        else:
+            raise ValueError("rotation must be given as 3x3 matrix or quaternion")
+        self.center = rot_mat @ self.center + translation
+        self.x, self.y, self.z = self.center
+        self.rot_mat = rot_mat @ self.rot_mat
+
 
 class Tree:
     def __init__(
@@ -467,29 +490,41 @@ class Tree:
         point_counts: List[float],
         points: List[np.ndarray] = None,
         hough_points: List[np.ndarray] = None,
-        votes: List[np.ndarray] = None,
+        hough_circles: List[Circle] = None,
+        hough_pixels: List[np.ndarray] = None,
+        hough_votes: List[np.ndarray] = None,
     ) -> None:
-        assert (
-            len(set([len(circles), len(point_counts)])) == 1
+        assert len(circles) == len(
+            point_counts
         ), "circles and point_counts must have the same length"
         if points is not None:
-            assert (
-                len(set([len(circles), len(points)])) == 1
+            assert len(circles) == len(
+                points
             ), "circles and points must have the same length"
         if hough_points is not None:
-            assert (
-                len(set([len(circles), len(hough_points)])) == 1
+            assert len(circles) == len(
+                hough_points
             ), "circles and hough_points must have the same length"
-        if votes is not None:
-            assert (
-                len(set([len(circles), len(votes)])) == 1
+        if hough_votes is not None:
+            assert len(circles) == len(
+                hough_votes
             ), "circles and votes must have the same length"
+        if hough_pixels is not None:
+            assert len(circles) == len(
+                hough_pixels
+            ), "circles and hough_pixels must have the same length"
+        if hough_circles is not None:
+            assert len(circles) == len(
+                hough_circles
+            ), "circles and hough_circles must have the same length"
 
         self.circles = circles
         self.point_counts = point_counts
         self.points = points
         self.hough_points = hough_points
-        self.votes = votes
+        self.hough_pixels = hough_pixels
+        self.hough_votes = hough_votes
+        self.hough_circles = hough_circles
 
     def generate_mesh(self):
         vertices, triangles = np.empty((0, 3)), np.empty((0, 3), dtype=int)
@@ -501,32 +536,42 @@ class Tree:
             vertices = np.vstack((vertices, verts))
         return vertices, triangles
 
-    def apply_transform(self, translation: np.ndarray, quaternion: np.ndarray):
+    def apply_transform(self, translation: np.ndarray, rotation: np.ndarray):
+        if rotation.shape[0] == 4:
+            rot_mat = Rotation.from_quat(rotation).as_matrix()
+        elif rotation.shape == (3, 3):
+            rot_mat = rotation
+        else:
+            raise ValueError("rotation must be given as 3x3 matrix or quaternion")
         for i in range(len(self.circles)):
-            rot_mat = Rotation.from_quat(quaternion).as_matrix()
-            self.circles[i].center = rot_mat @ self.circles[i].center + translation
-            self.circles[i].rot_mat = rot_mat @ self.circles[i].rot_mat
+            self.circles[i].apply_transform(translation, rotation)
+            if self.hough_circles is not None:
+                self.hough_circles[i].apply_transform(translation, rotation)
+            if self.points is not None:
+                self.points[i] = self.points[i] @ rot_mat.T + translation.squeeze()
+            if self.hough_points is not None:
+                self.hough_points[i] = (
+                    self.hough_points[i] @ rot_mat.T + translation.squeeze()
+                )
 
     @classmethod
-    def from_cloud(
+    def from_cluster(
         cls,
-        cloud: np.ndarray,
+        cluster: dict,
         slice_heights: Union[float, Iterable] = 0.5,
-        slice_thickness: float = 0.1,
+        slice_thickness: float = 0.3,
         outlier_radius: float = 0.02,
         max_center_deviation: float = 0.05,
         max_radius_deviation: float = 0.05,
         filter_min_points: int = 10,
+        min_hough_vote: float = 0.1,
         grid_res: float = 0.01,
-        min_radius: float = 0.05,
-        max_radius: float = 0.5,
         point_ratio: float = 0.2,
         entropy_weighting: float = 10.0,
         max_consecutive_fails: int = 3,
         max_height: float = 10.0,
-        save_points: bool = False,
-        save_hough_points: bool = False,
-        save_pixels: bool = False,
+        save_points: bool = True,
+        save_debug_results: bool = True,
         **kwargs,
     ) -> "Tree":
         """slices the given point cloud at regular intervals or given intervals and
@@ -534,7 +579,7 @@ class Tree:
         fit to the slices using a least squares fitting. The circles are then
 
         Args:
-            cloud (np.ndarray): Point cloud of the tree
+            cluster (dict): Cluster result including ["cloud"] and ["info"]["axis"]
             slice_heights (Union[float, Iterable]): if a float [m] is given, the
                 point cloud is sliced at regular intervals. If an iterable is given,
                 the point cloud is sliced at the given heights. Defaults to 0.5.
@@ -549,10 +594,6 @@ class Tree:
                 to fit a circle. Defaults to 10.
             grid_res (float, optional): Resolution of the hough grid in m. Defaults
                 to 0.01.
-            min_radius (float, optional): Minimum radius of a circle in m. Defaults
-                to 0.05.
-            max_radius (float, optional): Maximum radius of a circle in m. Defaults
-                to 0.5.
             point_ratio (float, optional): Ratio of points in a pixel wrt. number in
                 most populated pixel to be counted valid. Defaults to 0.2.
             entropy_weighting (float, optional): weight to weigh the hough votes by
@@ -565,15 +606,21 @@ class Tree:
                 fitted. Defaults to 10.0.
             save_points (bool, optional): If True, the points for each slice are saved
                 in the tree object. Defaults to False.
-            save_points_filtered (bool, optional): If True, the filtered points for
-                each slice are saved in the tree object. Defaults to False.
-            save_pixels (bool, optional): If True, the pixels for each slice are saved
-                that aggregate the points. Defaults to False.
+            save_debug_results(bool, optional): If True, intermediate results from the
+                hough filtering process are stored in the tree object.
 
         Returns:
             Tree: Tree object representing a stack of circles
         """
-        cirlce_stack = []
+        cloud = deepcopy(cluster["cloud"].point.positions.numpy())
+        axis = cluster["info"]["axis"]
+        center, rot_mat, r_from_seg = axis["center"], axis["rot_mat"], axis["radius"]
+
+        # move cloud to origin and rotate it upright
+        cloud -= center
+        cloud = cloud @ rot_mat  # equal to: cloud = (rot_mat.T @ cloud.T).T
+
+        circle_stack = []
         # slice point cloud
         if type(slice_heights) == float:
             slice_heights = np.arange(
@@ -585,72 +632,120 @@ class Tree:
         for slice_height in slice_heights:
             if fail_counter > max_consecutive_fails:
                 break
+
+            search_cylinder_radius = 2 * r_from_seg + max_radius_deviation  # TODO tune
             slice_points = cloud[
                 np.logical_and(
                     cloud[:, 2] >= slice_height - slice_thickness / 2,
                     cloud[:, 2] < slice_height + slice_thickness / 2,
                 )
-            ]
+            ]  # remove points outside of slice
+            slice_points = slice_points[
+                np.linalg.norm(slice_points[:, :2], axis=1) < search_cylinder_radius
+            ]  # remove points outside of search cylinder
 
             # check if there are enough points to fit a circle
             if len(slice_points) < filter_min_points:
+                print(f"Too few points ({len(slice_points)}) to fit a circle (1)")
                 fail_counter += 1
                 continue
 
             # fit hough circle to all points in the slice
-            circle, pc_votes = Circle.from_cloud_hough(
+            previous_circle = (
+                None if len(circle_stack) == 0 else circle_stack[-1]["circle"]
+            )
+            if previous_circle is not None:
+                previous_center = previous_circle.center
+                # min_radius = previous_circle.radius * (1 - max_radius_deviation)
+                # max_radius = previous_circle.radius * (1 + max_radius_deviation)
+            else:
+                previous_center = None
+            min_radius = 0.75 * r_from_seg
+            max_radius = 1.5 * r_from_seg
+
+            hough_circle, pixels, hough_votes, penalty = Circle.from_cloud_hough(
                 slice_points,
                 grid_res,
                 min_radius,
                 max_radius,
-                point_ratio,
-                entropy_weighting,
-                return_pixels=save_pixels,
+                point_ratio=point_ratio,
+                previous_center=previous_center,
+                search_radius=max_center_deviation,
+                entropy_weighting=entropy_weighting,
+                return_pixels_and_votes=True,
             )
+
+            if hough_circle is None:
+                print("No hough circle found")
+                fail_counter += 1
+                continue
+
+            # check for
+            if hough_votes.max() * penalty < min_hough_vote:
+                print(f"Hough vote {hough_votes.max() * penalty} not very promising")
+                fail_counter += 1
+                continue
 
             # filter points using the hough circle
             pc_filtered = slice_points[
-                circle.get_distance(slice_points) < outlier_radius
+                hough_circle.get_distance(slice_points) < outlier_radius
             ]
 
             # again, check if there are enough points to fit a circle. This is not a
             # redundant check as the check before will often spare expensive hough
             # calculations, whereas this check is necessary to fit a reasonabole
             # circle
-            if len(slice_points) < filter_min_points:
+            if len(pc_filtered) < filter_min_points:
+                print(f"Too few points ({len(pc_filtered)}) to fit a circle (2)")
                 fail_counter += 1
                 continue
 
             # fit circle to filtered points
-            circle = Circle.from_cloud_bullock(pc_filtered, slice_height)
+            bulloc_circle = Circle.from_cloud_bullock(pc_filtered, slice_height)
 
             # TODO check if circle is plausible. For now, just impose max radius of 1 m
-            if circle.radius > 1.0:
+            if bulloc_circle.radius > 1.0:
+                print("Radius too large")
                 fail_counter += 1
                 continue
 
             # aggregate results
-            cirlce_stack.append(
+            circle_stack.append(
                 {
                     "num_points": pc_filtered.shape[0],
-                    "circle": circle,
-                    "points": slice_points if save_points else None,
-                    "hough_points": pc_filtered if save_hough_points else None,
-                    "votes": pc_votes if save_pixels else None,
+                    "circle": bulloc_circle,
+                    "points": slice_points,  # if save_points else None,
+                    "hough_circle": hough_circle,  # if save_hough_points else None
+                    "hough_points": pc_filtered,  # if save_hough_points else None,
+                    "hough_pixels": pixels,  # if save_pixels else None,
+                    "votes": hough_votes,  # if save_pixels else None,
                 }
             )
 
             fail_counter = 0
 
-        return cls(
-            [t["circle"] for t in cirlce_stack],
-            [t["num_points"] for t in cirlce_stack],
-            points=[t["points"] for t in cirlce_stack] if save_points else None,
-            hough_points=[t["points"] for t in cirlce_stack]
-            if save_hough_points
-            else None,
-            votes=[t["votes"] for t in cirlce_stack] if save_pixels else None,
-        )
+        if save_debug_results:
+            tree = cls(
+                [t["circle"] for t in circle_stack],
+                [t["num_points"] for t in circle_stack],
+                points=[t["points"] for t in circle_stack] if save_points else None,
+                hough_points=[t["hough_points"] for t in circle_stack],
+                hough_circles=[t["hough_circle"] for t in circle_stack],
+                hough_pixels=[t["hough_pixels"] for t in circle_stack],
+                hough_votes=[t["votes"] for t in circle_stack],
+            )
+        else:
+            tree = cls(
+                [t["circle"] for t in circle_stack],
+                [t["num_points"] for t in circle_stack],
+            )
+
+        # reapply rotation and translation
+        cloud = cloud @ rot_mat.T
+        cloud += center
+        tree.apply_transform(center, rot_mat)
+
+        return tree
 
         # all_points_filtered = np.concatenate(pc_slices_filtered)
         # tree = {
@@ -736,3 +831,6 @@ class Tree:
         #     tree["circles"].insert(0, circ_iter)
         #     tree["base_circle_index"] += 1
         # return tree
+
+    def __str__(self) -> str:
+        return f"Tree: {len(self.circles)} circles, {len(self.points) if self.points is not None else 0} points"

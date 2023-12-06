@@ -25,7 +25,9 @@ catkin_package(
 
 catkin_install_python(PROGRAMS scripts/mission_analysis_node.py   
                       DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
-
+                      
+catkin_install_python(PROGRAMS scripts/forest_analysis_node.py   
+                      DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
 
 #############
 ## Install ##

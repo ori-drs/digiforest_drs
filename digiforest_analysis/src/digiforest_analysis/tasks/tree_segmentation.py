@@ -94,8 +94,8 @@ class TreeSegmentation(BaseTask):
         # Run clustering
         return_value = clustering.cluster(
             cloud,
-            cloth=cloth,
             method=self._clustering_method,
+            cloth=cloth,
             cluster_2d=self._cluster_2d,
             debug_level=self._debug_level,
             **kwargs,
