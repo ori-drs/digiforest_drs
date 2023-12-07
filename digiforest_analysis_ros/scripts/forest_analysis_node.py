@@ -10,3 +10,4 @@ if __name__ == "__main__":
 
     rospy.loginfo("[digiforest_forest_analysis_node] Ready")
     rospy.spin()
+    print("Bye!")

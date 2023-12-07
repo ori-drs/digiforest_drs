@@ -572,6 +572,7 @@ class Tree:
         max_height: float = 10.0,
         save_points: bool = True,
         save_debug_results: bool = True,
+        debug_level: int = 0,
         **kwargs,
     ) -> "Tree":
         """slices the given point cloud at regular intervals or given intervals and
@@ -608,6 +609,7 @@ class Tree:
                 in the tree object. Defaults to False.
             save_debug_results(bool, optional): If True, intermediate results from the
                 hough filtering process are stored in the tree object.
+            debug_level (int, optional): Verbosity level of debug msgs. Defaults to 0.
 
         Returns:
             Tree: Tree object representing a stack of circles
@@ -646,7 +648,8 @@ class Tree:
 
             # check if there are enough points to fit a circle
             if len(slice_points) < filter_min_points:
-                print(f"Too few points ({len(slice_points)}) to fit a circle (1)")
+                if debug_level > 0:
+                    print(f"Too few points ({len(slice_points)}) to fit a circle (1)")
                 fail_counter += 1
                 continue
 
@@ -676,13 +679,17 @@ class Tree:
             )
 
             if hough_circle is None:
-                print("No hough circle found")
+                if debug_level > 0:
+                    print("No hough circle found")
                 fail_counter += 1
                 continue
 
             # check for
             if hough_votes.max() * penalty < min_hough_vote:
-                print(f"Hough vote {hough_votes.max() * penalty} not very promising")
+                if debug_level > 0:
+                    print(
+                        f"Hough vote {hough_votes.max() * penalty} not very promising"
+                    )
                 fail_counter += 1
                 continue
 
@@ -696,7 +703,8 @@ class Tree:
             # calculations, whereas this check is necessary to fit a reasonabole
             # circle
             if len(pc_filtered) < filter_min_points:
-                print(f"Too few points ({len(pc_filtered)}) to fit a circle (2)")
+                if debug_level > 0:
+                    print(f"Too few points ({len(pc_filtered)}) to fit a circle (2)")
                 fail_counter += 1
                 continue
 
@@ -705,7 +713,8 @@ class Tree:
 
             # TODO check if circle is plausible. For now, just impose max radius of 1 m
             if bulloc_circle.radius > 1.0:
-                print("Radius too large")
+                if debug_level > 0:
+                    print("Radius too large")
                 fail_counter += 1
                 continue
 

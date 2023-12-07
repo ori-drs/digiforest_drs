@@ -1,6 +1,9 @@
 #!/usr/bin/env python
 # author: Leonard Freissmuth
 
+from functools import partial
+import os
+import pickle
 from typing import List
 import numpy as np
 import open3d as o3d
@@ -29,6 +32,8 @@ class ForestAnalysis:
         )
         self.last_header = None
 
+        rospy.on_shutdown(self.shutdown_routine)
+
     def read_params(self):
         # Subscribers
         self._payload_cloud_topic = rospy.get_param(
@@ -50,15 +55,8 @@ class ForestAnalysis:
         self._base_frame_id = rospy.get_param("~base_frame_id", "base")
 
         # Ground Segmentation
-        self._ground_segmentation_enabled = rospy.get_param(
-            "~ground_segmentation_enabled", False
-        )
-        self._ground_segmentation_method = rospy.get_param(
-            "~ground_segmentation_method", "csf"
-        )
-        self._ground_segmentation_cell_size = rospy.get_param(
-            "~ground_segmentation_cell_size", 2
-        )
+        self._cloth_enabled = rospy.get_param("~cloth_enabled", False)
+        self._cloth_cell_size = rospy.get_param("~cloth_cell_size", 2)
 
         # Clustering
         self._clustering_method = rospy.get_param("~clustering_method", "voronoi")
@@ -76,6 +74,35 @@ class ForestAnalysis:
         )
         self._clustering_n_threads = rospy.get_param("~clustering_n_threads", 8)
         self._clustering_cluster_2d = rospy.get_param("~clustering_cluster_2d", False)
+
+        # Fitting
+        self._fitting_slice_heights = rospy.get_param("~fitting_slice_heights", 0.5)
+        self._fitting_slice_thickness = rospy.get_param("~fitting_slice_thickness", 0.3)
+        self._fitting_outlier_radius = rospy.get_param("~fitting_outlier_radius", 0.02)
+        self._fitting_max_center_deviation = rospy.get_param(
+            "~fitting_max_center_deviation", 0.05
+        )
+        self._fitting_max_radius_deviation = rospy.get_param(
+            "~fitting_max_radius_deviation", 0.05
+        )
+        self._fitting_filter_min_points = rospy.get_param(
+            "~fitting_filter_min_points", 10
+        )
+        self._fitting_min_hough_vote = rospy.get_param("~fitting_min_hough_vote", 0.1)
+        self._fitting_grid_res = rospy.get_param("~fitting_grid_res", 0.01)
+        self._fitting_point_ratio = rospy.get_param("~fitting_point_ratio", 0.2)
+        self._fitting_entropy_weighting = rospy.get_param(
+            "~fitting_entropy_weighting", 10.0
+        )
+        self._fitting_max_consecutive_fails = rospy.get_param(
+            "~fitting_max_consecutive_fails", 3
+        )
+        self._fitting_max_height = rospy.get_param("~fitting_max_height", 10.0)
+        self._fitting_save_points = rospy.get_param("~fitting_save_points", True)
+        self._fitting_save_debug_results = rospy.get_param(
+            "~fitting_save_debug_results", False
+        )
+        self._fitting_n_threads = rospy.get_param("~fitting_n_threads", 1)
 
         # Internals
         self._tf_buffer = None
@@ -219,7 +246,7 @@ class ForestAnalysis:
             )
 
     def payload_cloud_callback(self, data: PointCloud2):
-        print("Received payload cloud")
+        rospy.loginfo("Received payload cloud")
         self.last_header = data.header
 
         try:
@@ -235,7 +262,7 @@ class ForestAnalysis:
             tf2_ros.ConnectivityException,
             tf2_ros.ExtrapolationException,
         ) as e:
-            print("Could not get transform from odom to sensor", e)
+            rospy.logwarn("Could not get transform from odom to sensor", e)
             return
 
         timer = Timer()
@@ -243,18 +270,18 @@ class ForestAnalysis:
             with timer("conversion"):
                 cloud = self.pc2_to_o3d(data)
 
-            if self._ground_segmentation_enabled:
-                with timer("cloth"):
+            if self._cloth_enabled:
+                with timer("Cloth"):
                     ground_seg = GroundSegmentation(
                         debug_level=self._debug_level,
-                        method=self._ground_segmentation_method,
-                        cell_size=self._ground_segmentation_cell_size,
+                        method="csf",
+                        cell_size=self._cloth_cell_size,
                     )
                     _, _, cloth = ground_seg.process(cloud=cloud, export_cloth=True)
             else:
                 cloth = None
 
-            with timer("clusterting"):
+            with timer("Clusterting"):
                 clusters = self.ts.process(
                     cloud=cloud,
                     cloth=cloth,
@@ -273,14 +300,55 @@ class ForestAnalysis:
                     locations=[c["info"]["axis"]["center"] for c in clusters],
                 )
 
-            with timer("fitting"):
+            with timer("Fitting"):
+                tree_from_cluster = partial(
+                    Tree.from_cluster,
+                    slice_heights=self._fitting_slice_heights,
+                    slice_thickness=self._fitting_slice_thickness,
+                    outlier_radius=self._fitting_outlier_radius,
+                    max_center_deviation=self._fitting_max_center_deviation,
+                    max_radius_deviation=self._fitting_max_radius_deviation,
+                    filter_min_points=self._fitting_filter_min_points,
+                    min_hough_vote=self._fitting_min_hough_vote,
+                    grid_res=self._fitting_grid_res,
+                    point_ratio=self._fitting_point_ratio,
+                    entropy_weighting=self._fitting_entropy_weighting,
+                    max_consecutive_fails=self._fitting_max_consecutive_fails,
+                    max_height=self._fitting_max_height,
+                    save_points=self._fitting_save_points,
+                    save_debug_results=self._fitting_save_debug_results,
+                    debug_level=self._debug_level,
+                )
                 trees = []
-                with Pool(processes=4) as pool:
-                    trees = pool.map(Tree.from_cluster, clusters)
-                # filter trees without circles
-                trees = [t for t in trees if len(t.circles)]
+                if self._fitting_n_threads == 1:
+                    for cluster in clusters:
+                        trees.append(tree_from_cluster(cluster))
+                else:
+                    with Pool(processes=self._fitting_n_threads) as pool:
+                        trees = pool.map(tree_from_cluster, clusters)
+
+            if self._debug_level > 1:
+                with timer("saving to disk"):
+                    directory = os.path.join("trees", str(self.last_header.stamp))
+                    if not os.path.exists(directory):
+                        os.makedirs(directory)
+                    else:
+                        for f in os.listdir(directory):
+                            os.remove(os.path.join(directory, f))
+                    for cluster, tree in zip(clusters, trees):
+                        cluster["tree"] = tree
+                    for cluster in clusters:
+                        with open(
+                            os.path.join(
+                                directory,
+                                f"tree{str(cluster['info']['id']).zfill(3)}.pkl",
+                            ),
+                            "wb",
+                        ) as file:
+                            pickle.dump(cluster, file)
 
             with timer("meshing"):
+                trees = [t for t in trees if len(t.circles)]
                 mesh_array = MarkerArray()
                 for tree in trees:
                     tree.apply_transform(translation, rotation)
@@ -290,5 +358,9 @@ class ForestAnalysis:
                         mesh_array.markers.append(mesh_msg)
                 self._pub_tree_meshes.publish(mesh_array)
 
-        print(timer)
-        print(f"Done: Found {len(trees)} trees")
+        rospy.loginfo(timer)
+        rospy.loginfo(f"Done: Found {len(trees)} trees")
+
+    def shutdown_routine(self, *args):
+        """Executes the operations before killing the mission analysis procedures"""
+        rospy.loginfo("Digiforest Analysis node stopped!")

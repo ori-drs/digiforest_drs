@@ -145,7 +145,11 @@ def euclidean_pcl(cloud, **kwargs):
 
 
 def pnts_to_axes_sq_dist(
-    pnts: np.ndarray, axes: np.ndarray, apply_sqrt: bool = False, debug_level: int = 0
+    points: np.ndarray,
+    axes: np.ndarray,
+    apply_sqrt: bool = False,
+    distance_point_fraction: float = 0.1,
+    debug_level: int = 0,
 ) -> np.ndarray:
     """Calculate the distance of all point to all axes. For efficiency, two planes are
     constructed fore every axis, which is the intersection of them.
@@ -157,6 +161,9 @@ def pnts_to_axes_sq_dist(
         axis (np.ndarray[Mx6]): axis in 3D space (direction vector, point on axis)
         sqrt (bool, optional): whether to return the sqrt of the squared distance.
             Defaults to False.
+        distance_point_fraction (float, optional): fraction of points to use for
+            calculating the distance. The rest is determined by point to point distance
+            calculation. Defaults to 0.1.
         debug_level (int, optional): verbosity level. Defaults to 0.
 
     Returns:
@@ -184,10 +191,10 @@ def pnts_to_axes_sq_dist(
     axis_pnts_to_origin_b = np.einsum("ij,ij->i", axis_pnts, normals_b)
     if debug_level > 0:
         print("signed_dist_a on thread", multiprocessing.current_process().name)
-    signed_dist_a = np.einsum("ij,kj->ik", pnts, normals_a) - axis_pnts_to_origin_a
+    signed_dist_a = np.einsum("ij,kj->ik", points, normals_a) - axis_pnts_to_origin_a
     if debug_level > 0:
         print("signed_dist_b on thread", multiprocessing.current_process().name)
-    signed_dist_b = np.einsum("ij,kj->ik", pnts, normals_b) - axis_pnts_to_origin_b
+    signed_dist_b = np.einsum("ij,kj->ik", points, normals_b) - axis_pnts_to_origin_b
     # this is much faster than np.power and np.sum ?! ^^
     if debug_level > 0:
         print("squaring on thread", multiprocessing.current_process().name)
@@ -198,7 +205,7 @@ def pnts_to_axes_sq_dist(
     return np.sqrt(sq_dists) if apply_sqrt else sq_dists
 
 
-def voronoi(  # noqa
+def voronoi(  # noqa: C901
     cloud,
     cloth: np.ndarray = None,
     hough_filter_radius: float = 0.1,
@@ -206,6 +213,7 @@ def voronoi(  # noqa
     crop_upper_bound: float = 8.0,
     max_cluster_radius: float = np.inf,
     n_threads: int = 8,
+    distance_point_fraction: float = 0.1,
     debug_level: int = 0,
     cluster_2d: bool = False,
 ):
@@ -309,7 +317,7 @@ def voronoi(  # noqa
             "rot_mat": rot_mat,
         }
         if debug_level > 1:
-            axis_dict["cloud"] = cluster_points
+            axis_dict["cloud"] = o3d.t.geometry.PointCloud.from_legacy(cluster_points)
         axes.append(axis_dict)
 
     if debug_level > 1:
@@ -330,19 +338,31 @@ def voronoi(  # noqa
                 (axis["rot_mat"].T @ np.array(cylinder.vertices).T).T + axis["center"]
             )
             cylinders.append(cylinder)
-        o3d.visualization.draw_geometries([c["cloud"] for c in axes] + cylinders)
+        o3d.visualization.draw_geometries(
+            [c["cloud"].to_legacy() for c in axes] + cylinders
+        )
 
     # 6. Perform voronoi tesselation of point cloud without floor
     # calculate distance to each axis
     axes_np = np.array([np.hstack((a["direction"], a["center"])) for a in axes])
     print(f"Clustering with {n_threads} threads")
     if n_threads == 1:
-        dists = pnts_to_axes_sq_dist(points_numpy, axes_np)
+        dists = pnts_to_axes_sq_dist(
+            points=points_numpy,
+            axes=axes_np,
+            distance_point_fraction=distance_point_fraction,
+            debug_level=debug_level,
+        )
     else:
         with Pool() as pool:
             points_grouped = np.array_split(points_numpy, n_threads, axis=0)
             dists = pool.map(
-                partial(pnts_to_axes_sq_dist, axes=axes_np, debug_level=debug_level),
+                partial(
+                    pnts_to_axes_sq_dist,
+                    axes=axes_np,
+                    distance_point_fraction=distance_point_fraction,
+                    debug_level=debug_level,
+                ),
                 points_grouped,
             )
             dists = np.vstack(dists)
