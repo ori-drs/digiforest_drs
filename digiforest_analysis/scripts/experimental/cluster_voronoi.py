@@ -1,11 +1,13 @@
 import digiforest_analysis.tasks.tree_segmentation as ts
 from digiforest_analysis.tasks.tree_reconstruction import Tree
 from digiforest_analysis.utils.io import load
+from digiforest_analysis.utils.timing import Timer
 
 import numpy as np
 import open3d as o3d
-from multiprocessing import Pool
 from matplotlib import pyplot as plt
+
+timer = Timer()
 
 
 def plot_mesh(vertices, triangles, points):
@@ -66,9 +68,20 @@ if __name__ == "__main__":
 
     # ground_seg = gs.GroundSegmentation(debug_level=0, method="csf", cell_size=2)
     # _, forest_cloud, cloth = ground_seg.process(cloud=cloud, export_cloth=True)
-    tree_seg = ts.TreeSegmentation(debug_level=0, clustering_method="voronoi")
-    clusters = tree_seg.process(cloud=cloud, cluster_dist=2)
+    tree_seg = ts.TreeSegmentation(debug_level=2, clustering_method="voronoi")
+    clusters = tree_seg.process(
+        cloud=cloud, max_cluster_radius=2, n_threads=1, point_fraction=0.1
+    )
 
+    # TREE FITTING
+    trees = []
+    for cluster in clusters:
+        tree = Tree(id=cluster["info"]["id"])
+        tree.add_cluster(cluster)
+        tree.reconstruct()
+        trees.append(tree)
+
+    # # SAVING CLUSTER TO DISK
     # import pickle
     # for i, cluster in enumerate(clusters):
     #     path = f"/home/ori/git/realtime-trees/single_trees/clustering_2/tree{str(i).zfill(3)}"
@@ -80,17 +93,16 @@ if __name__ == "__main__":
     #     with open(path + ".pkl", 'wb') as file:
     #         pickle.dump(cluster, file)
 
-    with Pool() as pool:
-        trees = pool.map(Tree.from_cluster, clusters)
-
-    print(np.array([1 if len(t.circles) else 0 for t in trees]).sum())
-    # for tree, points in zip(trees, [clusters["cloud"].point.positions.numpy() for clusters in clusters]):
-    #     verts, tris = tree.generate_mesh()
-    #     if len(verts) == 0 or len(tris) == 0:
-    #         continue
-    #     plot_mesh(verts, tris, points)
-    #     print(
-    #         "Tree mesh has {} vertices and {} triangles".format(len(verts), len(tris))
-    #     )
+    # PLOTTING TREE MESHES
+    for tree, points in zip(
+        trees, [clusters["cloud"].point.positions.numpy() for clusters in clusters]
+    ):
+        verts, tris = tree.generate_mesh()
+        if len(verts) == 0 or len(tris) == 0:
+            continue
+        plot_mesh(verts, tris, points)
+        print(
+            "Tree mesh has {} vertices and {} triangles".format(len(verts), len(tris))
+        )
 
     print("Done!")

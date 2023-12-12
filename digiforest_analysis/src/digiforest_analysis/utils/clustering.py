@@ -1,12 +1,16 @@
 from functools import partial
 from multiprocessing import Pool
 import multiprocessing
+from digiforest_analysis.utils.timing import Timer
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 from sklearn.decomposition import PCA
 import open3d as o3d
+from scipy.spatial import cKDTree
 
 from digiforest_analysis.tasks.tree_reconstruction import Circle
+
+timer = Timer()
 
 
 def cluster(cloud, method="dbscan_open3d", **kwargs):
@@ -148,7 +152,6 @@ def pnts_to_axes_sq_dist(
     points: np.ndarray,
     axes: np.ndarray,
     apply_sqrt: bool = False,
-    distance_point_fraction: float = 0.1,
     debug_level: int = 0,
 ) -> np.ndarray:
     """Calculate the distance of all point to all axes. For efficiency, two planes are
@@ -161,7 +164,7 @@ def pnts_to_axes_sq_dist(
         axis (np.ndarray[Mx6]): axis in 3D space (direction vector, point on axis)
         sqrt (bool, optional): whether to return the sqrt of the squared distance.
             Defaults to False.
-        distance_point_fraction (float, optional): fraction of points to use for
+        point_fraction (float, optional): fraction of points to use for
             calculating the distance. The rest is determined by point to point distance
             calculation. Defaults to 0.1.
         debug_level (int, optional): verbosity level. Defaults to 0.
@@ -213,7 +216,7 @@ def voronoi(  # noqa: C901
     crop_upper_bound: float = 8.0,
     max_cluster_radius: float = np.inf,
     n_threads: int = 8,
-    distance_point_fraction: float = 0.1,
+    point_fraction: float = 0.1,
     debug_level: int = 0,
     cluster_2d: bool = False,
 ):
@@ -224,101 +227,114 @@ def voronoi(  # noqa: C901
     labels = -np.ones(cloud.point.positions.shape[0], dtype=np.int32)
 
     # 1. Normalize heights
-    if cloth is not None:
-        interpolator = RegularGridInterpolator(
-            points=(cloth[:, 0, 1], cloth[0, :, 0]),
-            values=cloth[:, :, 2],
-            method="linear",
-            bounds_error=False,
-            fill_value=0.0,
-        )
-        heights = interpolator(cloud.point.positions.numpy()[:, :2])
-        cloud.point.positions[:, 2] -= heights.astype(np.float32)
+    with timer("normalizing heights"):
+        if cloth is not None:
+            interpolator = RegularGridInterpolator(
+                points=(cloth[:, 0, 1], cloth[0, :, 0]),
+                values=cloth[:, :, 2],
+                method="linear",
+                bounds_error=False,
+                fill_value=0.0,
+            )
+            heights = interpolator(cloud.point.positions.numpy()[:, :2])
+            cloud.point.positions[:, 2] -= heights.astype(np.float32)
 
     # 2. Crop point cloud between cluster_strip_min and cluster_strip_max
-    points_numpy = cloud.point.positions.numpy()
-    cluster_strip_mask = np.logical_and(
-        points_numpy[:, 2] > crop_lower_bound, points_numpy[:, 2] < crop_upper_bound
-    )
-    cluster_strip = cloud.select_by_mask(cluster_strip_mask.astype(bool))
+    with timer("cropping"):
+        points_numpy = cloud.point.positions.numpy()
+        cluster_strip_mask = np.logical_and(
+            points_numpy[:, 2] > crop_lower_bound, points_numpy[:, 2] < crop_upper_bound
+        )
+        cluster_strip = cloud.select_by_mask(cluster_strip_mask.astype(bool))
 
     # 3. Perform db scan clustering after removing outliers
-    _, ind = cluster_strip.to_legacy().remove_statistical_outlier(
-        nb_neighbors=20, std_ratio=2.0
-    )
+    with timer("dbscan clustering of crops"):
+        _, ind = cluster_strip.to_legacy().remove_statistical_outlier(
+            nb_neighbors=20, std_ratio=2.0
+        )
 
-    cluster_strip = cluster_strip.select_by_index(ind)
+        cluster_strip = cluster_strip.select_by_index(ind)
 
-    labels_pre = cluster_strip.cluster_dbscan(
-        eps=0.7, min_points=20, print_progress=False
-    ).numpy()
+        labels_pre = cluster_strip.cluster_dbscan(
+            eps=0.7, min_points=20, print_progress=False
+        ).numpy()
 
     # 4. Clean up non-stem points using hough transform
-    max_label = np.max(labels_pre)
-    axes = []
-    for i in range(max_label):
-        cluster_points = cluster_strip.select_by_mask(labels_pre == i)
-        cluster_points = cluster_points.point.positions.numpy()
-        # 4.1. Remove clusters with fewer than 100 points
-        if cluster_points.shape[0] < 100:
-            if debug_level > 0:
-                print("Too few points")
-            continue
+    with timer("hough"):
+        max_label = np.max(labels_pre)
+        axes = []
+        for i in range(max_label):
+            with timer("hough->cluster selection"):
+                cluster_points = cluster_strip.select_by_mask(labels_pre == i)
+                cluster_points = cluster_points.point.positions.numpy()
+            # 4.1. Remove clusters with fewer than 100 points
+            with timer("hough->cluster size check"):
+                if cluster_points.shape[0] < 100:
+                    if debug_level > 0:
+                        print("Too few points")
+                    continue
 
-        # 4.2. remove clsters not extending between cluster_strip_min and cluster_strip_max
-        if (
-            np.min(cluster_points[:, 2]) > 1.05 * crop_lower_bound
-            or np.max(cluster_points[:, 2]) < 0.95 * crop_upper_bound
-        ):
-            if debug_level > 0:
-                print(
-                    "Cluster not extending between cluster_strip_min and cluster_strip_max"
+            # 4.2. remove clsters not extending between cluster_strip_min and cluster_strip_max
+            with timer("hough->extension check"):
+                if (
+                    np.min(cluster_points[:, 2]) > 1.05 * crop_lower_bound
+                    or np.max(cluster_points[:, 2]) < 0.95 * crop_upper_bound
+                ):
+                    if debug_level > 0:
+                        print(
+                            "Cluster not extending between cluster_strip_min and cluster_strip_max"
+                        )
+                    continue
+            # 4.2. Find circles in projection of cloud onto x-y plane
+            with timer("hough->hough circle"):
+                circ, _, votes, _ = Circle.from_cloud_hough(
+                    points=cluster_points,
+                    grid_res=0.02,
+                    min_radius=0.05,
+                    max_radius=0.5,
+                    return_pixels_and_votes=True,
                 )
-            continue
-        # 4.2. Find circles in projection of cloud onto x-y plane
-        circ, _, votes, _ = Circle.from_cloud_hough(
-            points=cluster_points,
-            grid_res=0.02,
-            min_radius=0.05,
-            max_radius=0.5,
-            return_pixels_and_votes=True,
-        )
-        if votes.max() < 0.1:
-            if debug_level > 0:
-                print("max_vote < 0.1")
-            continue
+                if votes.max() < 0.1:
+                    if debug_level > 0:
+                        print("max_vote < 0.1")
+                    continue
 
-        if debug_level > 0:
-            print(
-                f"Center coordinates of hough circle: ({circ.x}, {circ.y}), Radius: {circ.radius}, Maximum vote: {votes.max()}"
-            )
+                if debug_level > 0:
+                    print(
+                        f"Center coordinates of hough circle: ({circ.x}, {circ.y}), Radius: {circ.radius}, Maximum vote: {votes.max()}"
+                    )
 
-        # 4.3. Remove points that are not close to the circle
-        dist = circ.get_distance(cluster_points)
-        cluster_points = cluster_points[dist < hough_filter_radius]
+            # 4.3. Remove points that are not close to the circle
+            with timer("hough->filter"):
+                dist = circ.get_distance(cluster_points)
+                cluster_points = cluster_points[dist < hough_filter_radius]
 
-        # 5. Fit tree axes to clusters using PCA
-        pca = PCA(n_components=3)
-        pca.fit(cluster_points)
-        tree_direction = pca.components_[0]
-        rot_mat = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]]) @ pca.components_
-        if rot_mat[2, 2] < 0:
-            rot_mat[:, 1:] *= -1  # make sure the z component of the pca is positive
+            # 5. Fit tree axes to clusters using PCA
+            with timer("hough->PCA fitting"):
+                pca = PCA(n_components=3)
+                pca.fit(cluster_points)
+                rot_mat = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]]) @ pca.components_
+                if rot_mat[2, 2] < 0:
+                    rot_mat[
+                        :, 1:
+                    ] *= -1  # make sure the z component of the pca is positive
 
-        # convert cluster_points into open3d point cloud and give a random color
-        cluster_points = o3d.geometry.PointCloud(
-            o3d.utility.Vector3dVector(cluster_points)
-        )
-        cluster_points.paint_uniform_color(np.random.rand(3))
-        axis_dict = {
-            "direction": tree_direction,
-            "center": np.array([circ.x, circ.y, crop_lower_bound]),
-            "radius": circ.radius,
-            "rot_mat": rot_mat,
-        }
-        if debug_level > 1:
-            axis_dict["cloud"] = o3d.t.geometry.PointCloud.from_legacy(cluster_points)
-        axes.append(axis_dict)
+            # convert cluster_points into open3d point cloud and give a random color
+            with timer("hough->points to open3d"):
+                cluster_points = o3d.geometry.PointCloud(
+                    o3d.utility.Vector3dVector(cluster_points)
+                )
+                cluster_points.paint_uniform_color(np.random.rand(3))
+                axis_dict = {
+                    "center": np.array([circ.x, circ.y, crop_lower_bound]),
+                    "radius": circ.radius,
+                    "rot_mat": rot_mat,
+                }
+                if debug_level > 1:
+                    axis_dict["cloud"] = o3d.t.geometry.PointCloud.from_legacy(
+                        cluster_points
+                    )
+                axes.append(axis_dict)
 
     if debug_level > 1:
         cylinders = []
@@ -344,46 +360,71 @@ def voronoi(  # noqa: C901
 
     # 6. Perform voronoi tesselation of point cloud without floor
     # calculate distance to each axis
-    axes_np = np.array([np.hstack((a["direction"], a["center"])) for a in axes])
-    print(f"Clustering with {n_threads} threads")
-    if n_threads == 1:
-        dists = pnts_to_axes_sq_dist(
-            points=points_numpy,
-            axes=axes_np,
-            distance_point_fraction=distance_point_fraction,
-            debug_level=debug_level,
-        )
-    else:
-        with Pool() as pool:
-            points_grouped = np.array_split(points_numpy, n_threads, axis=0)
-            dists = pool.map(
-                partial(
-                    pnts_to_axes_sq_dist,
-                    axes=axes_np,
-                    distance_point_fraction=distance_point_fraction,
-                    debug_level=debug_level,
-                ),
-                points_grouped,
+    with timer("voronoi"):
+        axes_np = np.array([np.hstack((a["rot_mat"][2, :], a["center"])) for a in axes])
+        if point_fraction < 1.0:
+            precise_mask = np.random.rand(points_numpy.shape[0]) < point_fraction
+            precise_query_points = points_numpy[precise_mask]
+        else:
+            precise_query_points = points_numpy
+
+        print(f"Clustering with {n_threads} threads")
+        if n_threads == 1:
+            precise_dists = pnts_to_axes_sq_dist(
+                points=precise_query_points,
+                axes=axes_np,
+                debug_level=debug_level,
             )
-            dists = np.vstack(dists)
-    if debug_level > 0:
-        print("Clustering done")
-    # dists = pnts_to_axes_sq_dist(points_numpy, axes_np)
+        else:
+            with Pool() as pool:
+                points_grouped = np.array_split(precise_query_points, n_threads, axis=0)
+                dists = pool.map(
+                    partial(
+                        pnts_to_axes_sq_dist, axes=axes_np, debug_level=debug_level
+                    ),
+                    points_grouped,
+                )
+                precise_dists = np.vstack(dists)
 
-    labels = np.argmin(dists, axis=1)
-    if max_cluster_radius != np.inf:
-        labels[dists[np.arange(dists.shape[0]), labels] > max_cluster_radius**2] = -1
+        precise_labels = np.argmin(precise_dists, axis=1)
+        precise_min_dists = precise_dists[
+            np.arange(precise_dists.shape[0]), precise_labels
+        ]
+        if point_fraction < 1.0:
+            labels = np.empty((points_numpy.shape[0]), dtype=np.int32)
+            min_dists = np.empty((points_numpy.shape[0]))
+            # fill precise values
+            labels[precise_mask] = precise_labels
+            min_dists[precise_mask] = precise_min_dists
+            # find other values using cKD tree
+            kd_tree = cKDTree(points_numpy[precise_mask])
+            _, idcs = kd_tree.query(points_numpy[~precise_mask], k=1, workers=-1)
+            labels[~precise_mask] = precise_labels[idcs]
+            min_dists[~precise_mask] = precise_min_dists[idcs]
+        else:
+            dists = precise_dists
+            labels = precise_labels
+            min_dists = precise_min_dists
 
-    # remove clusters with fewer than 50 points
-    filtered_axes = []
-    unique_labels, counts = np.unique(labels, return_counts=True)
-    for label, count in zip(unique_labels, counts):
-        if count < 50:
-            labels[labels == label] = -1
-    # make sure the label index is continuous
-    unique_labels = np.sort(np.unique(labels))
-    for i, label in enumerate(unique_labels[1:]):
-        labels[labels == label] = i
-        filtered_axes.append(axes[label])
+        if debug_level > 0:
+            print("Clustering done")
+        # dists = pnts_to_axes_sq_dist(points_numpy, axes_np)
+
+        if max_cluster_radius != np.inf:
+            labels[min_dists > max_cluster_radius**2] = -1
+
+    with timer("data grooming"):
+        # remove clusters with fewer than 50 points
+        filtered_axes = []
+        unique_labels, counts = np.unique(labels, return_counts=True)
+        for label, count in zip(unique_labels, counts):
+            if count < 50:
+                labels[labels == label] = -1
+        # make sure the label index is continuous
+        unique_labels = np.sort(np.unique(labels))
+        for i, label in enumerate(unique_labels[1:]):
+            labels[labels == label] = i
+            filtered_axes.append(axes[label])
+    print(timer)
 
     return labels, filtered_axes

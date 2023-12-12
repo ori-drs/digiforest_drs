@@ -1,4 +1,4 @@
-from typing import Iterable, List, Union, Tuple
+from typing import Iterable, Union, Tuple
 import numpy as np
 from skimage.transform import hough_circle
 from copy import deepcopy
@@ -484,80 +484,85 @@ class Circle:
 
 
 class Tree:
-    def __init__(
-        self,
-        circles: List[Circle],
-        point_counts: List[float],
-        points: List[np.ndarray] = None,
-        hough_points: List[np.ndarray] = None,
-        hough_circles: List[Circle] = None,
-        hough_pixels: List[np.ndarray] = None,
-        hough_votes: List[np.ndarray] = None,
-    ) -> None:
-        assert len(circles) == len(
-            point_counts
-        ), "circles and point_counts must have the same length"
-        if points is not None:
-            assert len(circles) == len(
-                points
-            ), "circles and points must have the same length"
-        if hough_points is not None:
-            assert len(circles) == len(
-                hough_points
-            ), "circles and hough_points must have the same length"
-        if hough_votes is not None:
-            assert len(circles) == len(
-                hough_votes
-            ), "circles and votes must have the same length"
-        if hough_pixels is not None:
-            assert len(circles) == len(
-                hough_pixels
-            ), "circles and hough_pixels must have the same length"
-        if hough_circles is not None:
-            assert len(circles) == len(
-                hough_circles
-            ), "circles and hough_circles must have the same length"
+    def __init__(self, id: int) -> None:
+        self.id = id
 
-        self.circles = circles
-        self.point_counts = point_counts
-        self.points = points
-        self.hough_points = hough_points
-        self.hough_pixels = hough_pixels
-        self.hough_votes = hough_votes
-        self.hough_circles = hough_circles
+        self.reconstructed = False
+        self.circles = None
+        self.slice_points = None  # just for debugging
+        self.hough_points = None  # just for debugging
+        self.hough_circles = None  # just for debugging
+        self.hough_pixels = None  # just for debugging
+        self.hough_votes = None  # just for debugging
 
-    def generate_mesh(self):
-        vertices, triangles = np.empty((0, 3)), np.empty((0, 3), dtype=int)
-        for i in range(len(self.circles) - 1):
-            verts, tris = self.circles[i].genereate_cone_frustum_mesh(
-                self.circles[i + 1]
-            )
-            triangles = np.vstack((triangles, tris + vertices.shape[0]))
-            vertices = np.vstack((vertices, verts))
-        return vertices, triangles
+        self.clusters = []
+
+    def add_cluster(self, cluster: dict):
+        self.clusters.append(cluster)
+
+    @property
+    def axis(self) -> dict:
+        if len(self.clusters) == 0:
+            raise ValueError("No measurements available yet.")
+
+        # calculate mean of all axis parameters
+        axes = [cluster["info"]["axis"] for cluster in self.clusters]
+        mean_center = np.mean([axis["center"] for axis in axes], axis=0)
+        mean_radius = np.mean([axis["radius"] for axis in axes], axis=0)
+
+        # mean rotation is a bit trickier, scipy takes care of that
+        rotation_stack = Rotation.from_matrix([axis["rot_mat"] for axis in axes])
+        mean_rotation = rotation_stack.mean().as_matrix()
+
+        return {
+            "center": mean_center,
+            "radius": mean_radius,
+            "rot_mat": mean_rotation,
+        }
+
+    @property
+    def points(self):
+        if len(self.axes) == 0:
+            raise ValueError("No measurements available yet.")
+
+        # TODO ICP in x-y-plane to align all points
+
+        return np.vstack(
+            [cluster["cloud"].point.positions.numpy() for cluster in self.clusters]
+        )
 
     def apply_transform(self, translation: np.ndarray, rotation: np.ndarray):
+        """applies the transform to all member objects of this tree.
+
+        Args:
+            translation (np.ndarray): 3x1 translation vector
+            rotation (np.ndarray): Either 3x3 rotation matrix or 4x1 quaternion
+
+        Raises:
+            ValueError: if rotation is not given as 3x3 matrix or 4x1 quaternion
+        """
         if rotation.shape[0] == 4:
             rot_mat = Rotation.from_quat(rotation).as_matrix()
         elif rotation.shape == (3, 3):
             rot_mat = rotation
         else:
             raise ValueError("rotation must be given as 3x3 matrix or quaternion")
-        for i in range(len(self.circles)):
-            self.circles[i].apply_transform(translation, rotation)
-            if self.hough_circles is not None:
-                self.hough_circles[i].apply_transform(translation, rotation)
-            if self.points is not None:
-                self.points[i] = self.points[i] @ rot_mat.T + translation.squeeze()
-            if self.hough_points is not None:
-                self.hough_points[i] = (
-                    self.hough_points[i] @ rot_mat.T + translation.squeeze()
-                )
+        if self.reconstructed:
+            for i in range(len(self.circles)):
+                self.circles[i].apply_transform(translation, rotation)
+                if self.hough_circles is not None:
+                    self.hough_circles[i].apply_transform(translation, rotation)
+                if self.slice_points is not None:
+                    self.slice_points[i] = (
+                        self.slice_points[i] @ rot_mat.T + translation.squeeze()
+                    )
+                if self.hough_points is not None:
+                    self.hough_points[i] = (
+                        self.hough_points[i] @ rot_mat.T + translation.squeeze()
+                    )
 
-    @classmethod
-    def from_cluster(
-        cls,
-        cluster: dict,
+    def reconstruct(
+        self,
         slice_heights: Union[float, Iterable] = 0.5,
         slice_thickness: float = 0.3,
         outlier_radius: float = 0.02,
@@ -570,17 +575,15 @@ class Tree:
         entropy_weighting: float = 10.0,
         max_consecutive_fails: int = 3,
         max_height: float = 10.0,
-        save_points: bool = True,
         save_debug_results: bool = True,
         debug_level: int = 0,
         **kwargs,
-    ) -> "Tree":
+    ) -> bool:
         """slices the given point cloud at regular intervals or given intervals and
         vilters the slices using the hough transform. After filtering, circles are
         fit to the slices using a least squares fitting. The circles are then
 
         Args:
-            cluster (dict): Cluster result including ["cloud"] and ["info"]["axis"]
             slice_heights (Union[float, Iterable]): if a float [m] is given, the
                 point cloud is sliced at regular intervals. If an iterable is given,
                 the point cloud is sliced at the given heights. Defaults to 0.5.
@@ -612,10 +615,10 @@ class Tree:
             debug_level (int, optional): Verbosity level of debug msgs. Defaults to 0.
 
         Returns:
-            Tree: Tree object representing a stack of circles
+            bool: True if reconstruction yielded at least two circles, else False
         """
-        cloud = deepcopy(cluster["cloud"].point.positions.numpy())
-        axis = cluster["info"]["axis"]
+        cloud = self.points
+        axis = self.axis
         center, rot_mat, r_from_seg = axis["center"], axis["rot_mat"], axis["radius"]
 
         # move cloud to origin and rotate it upright
@@ -709,10 +712,10 @@ class Tree:
                 continue
 
             # fit circle to filtered points
-            bulloc_circle = Circle.from_cloud_bullock(pc_filtered, slice_height)
+            bullock_circle = Circle.from_cloud_bullock(pc_filtered, slice_height)
 
             # TODO check if circle is plausible. For now, just impose max radius of 1 m
-            if bulloc_circle.radius > 1.0:
+            if bullock_circle.radius > 1.0:
                 if debug_level > 0:
                     print("Radius too large")
                 fail_counter += 1
@@ -722,8 +725,8 @@ class Tree:
             circle_stack.append(
                 {
                     "num_points": pc_filtered.shape[0],
-                    "circle": bulloc_circle,
-                    "points": slice_points,  # if save_points else None,
+                    "circle": bullock_circle,
+                    "slice_points": slice_points,  # if save_points else None,
                     "hough_circle": hough_circle,  # if save_hough_points else None
                     "hough_points": pc_filtered,  # if save_hough_points else None,
                     "hough_pixels": pixels,  # if save_pixels else None,
@@ -733,113 +736,46 @@ class Tree:
 
             fail_counter = 0
 
-        if save_debug_results:
-            tree = cls(
-                [t["circle"] for t in circle_stack],
-                [t["num_points"] for t in circle_stack],
-                points=[t["points"] for t in circle_stack] if save_points else None,
-                hough_points=[t["hough_points"] for t in circle_stack],
-                hough_circles=[t["hough_circle"] for t in circle_stack],
-                hough_pixels=[t["hough_pixels"] for t in circle_stack],
-                hough_votes=[t["votes"] for t in circle_stack],
-            )
+        if len(circle_stack) < 2:
+            if debug_level > 0:
+                print("Not enough circles found")
+            self.circles = []
+            self.reconstructed = False
+            return False
         else:
-            tree = cls(
-                [t["circle"] for t in circle_stack],
-                [t["num_points"] for t in circle_stack],
+            self.circles = [t["circle"] for t in circle_stack]
+            self.reconstructed = True
+            if save_debug_results:
+                self.slice_points = ([t["slice_points"] for t in circle_stack],)
+                self.hough_points = ([t["hough_points"] for t in circle_stack],)
+                self.hough_circles = ([t["hough_circle"] for t in circle_stack],)
+                self.hough_pixels = ([t["hough_pixels"] for t in circle_stack],)
+                self.hough_votes = ([t["votes"] for t in circle_stack],)
+
+            # reapply rotation and translation
+            self.apply_transform(center, rot_mat)
+
+            return True
+
+    def generate_mesh(self) -> Tuple[np.ndarray, np.ndarray]:
+        """generates a mesh for the tree by connecting the circles with cone frustums
+
+        Returns:
+            np.ndarray: vertices of the mesh
+            np.ndarray: triangle indices of the mesh
+        """
+        if not self.reconstructed:
+            return None, None
+
+        vertices, triangles = np.empty((0, 3)), np.empty((0, 3), dtype=int)
+        for i in range(len(self.circles) - 1):
+            verts, tris = self.circles[i].genereate_cone_frustum_mesh(
+                self.circles[i + 1]
             )
+            triangles = np.vstack((triangles, tris + vertices.shape[0]))
+            vertices = np.vstack((vertices, verts))
 
-        # reapply rotation and translation
-        cloud = cloud @ rot_mat.T
-        cloud += center
-        tree.apply_transform(center, rot_mat)
-
-        return tree
-
-        # all_points_filtered = np.concatenate(pc_slices_filtered)
-        # tree = {
-        #     "axis": {"center": None, "direction": None},
-        #     "circles": [],
-        # }
-
-        # # helper functions
-        # def weighting_function(dist:np.ndarray, r:float=outlier_radius)->np.ndarray:
-        #     return np.exp(-np.power(dist, 2) / (2 * np.power(r, 2)))
-
-        # # Step 1.     find principal axis using PCA
-        # pca = PCA(n_components=3)
-        # pca.fit(all_points_filtered)
-        # tree_axis = pca.components_[0]
-        # tree["axis"]["direction"] = tree_axis
-
-        # # Step 2.     find the slice with the most points. This is deemed to be the
-        # #             most relieable filtering result and called the base slice
-        # i_base = np.argmax([slice.shape[0] for slice in pc_slices])
-        # # Step 2.1.   fit a precise circle to these inliers using RANSAC
-        # base_circle, _ = fit_circle_ransac(pc_slices[i_base], **kwargs)
-        # base_circle.update_height(slice_heights[i_base])
-        # tree["circles"].append(base_circle)
-        # # Step 2.2.   the centre of this circle is the centre of the stem axis
-        # tree["axis"]["center"] = base_circle.center
-        # tree["base_circle_index"] = 0  # has to be updated when pushing to front
-
-        # # Step 3.     Work in both directions up and down from the base circle
-        # # Step 3.1.   Direction up
-        # i_iter = i_base
-
-        # while i_iter < len(pc_slices) - 1:
-        #     i_iter += 1
-        #     # Step 3.1.1. initialize a circle directly above the previous one with
-        #     #             the previous radius
-        #     circ_iter = deepcopy(tree["circles"][-1])
-        #     circ_iter.update_height(slice_heights[i_iter])
-        #     # Step 3.1.2. do not eliminate all points far from the hough circle, but
-        #     #             weigh them nonlinearly by the distance
-        #     pc_slice_iter = pc_slices[i_iter]
-        #     if pc_slice_iter.shape[0] < 5:
-        #         continue
-        #     filter_circle = filter_circles[i_iter]
-        #     weights = np.abs(weighting_function(filter_circle.get_distance(pc_slice_iter)))
-        #     # Step 3.1.3. fit the circle to the new point slice using the advanced
-        #     #             circle-segment-algo restricting the movement of the center
-        #     #             and the change in radius.
-        #     # R_min = circ_iter.radius - max_radius_deviation
-        #     # R_max = circ_iter.radius + max_radius_deviation
-        #     # circ_iter = fit_circle_lm(circ_iter, pc_slice_iter, weights, slice_heights[i_iter])
-        #     circ_iter = fit_circle_bullock(pc_slice_iter, slice_heights[i_iter])
-
-        #     # Step 3.1.4. limit changes in center position and radius
-        #     # Step 3.1.5. check fit plausability / quality
-        #     # Step 4.     if fit is good, add circle to tree
-        #     tree["circles"].append(circ_iter)
-
-        # # Step 3.2.   Direction down
-        # i_iter = i_base
-        # while i_iter > 1:
-        #     i_iter -= 1
-        #     # Step 3.2.1. initialize a circle directly below the previous one with
-        #     #             the previous radius
-        #     circ_iter = deepcopy(tree["circles"][0])
-        #     circ_iter.update_height(slice_heights[i_iter])
-        #     # Step 3.2.2. do not eliminate all points far from the hough circle, but
-        #     #             weigh them nonlinearly by the distance
-        #     pc_slice_iter = pc_slices[i_iter]
-        #     if pc_slice_iter.shape[0] < 5:
-        #         continue
-        #     filter_circle = filter_circles[i_iter]
-        #     weights = np.abs(weighting_function(filter_circle.get_distance(pc_slice_iter)))
-        #     # Step 3.2.3. fit it to the new point slice using the advanced
-        #     #             circle-segment- algo
-        #     # circ_iter = fit_circle_lm(circ_iter, pc_slice_iter, weights, slice_heights[i_iter])
-        #     circ_iter = fit_circle_bullock(pc_slice_iter, slice_heights[i_iter])
-        #     # Step 3.2.4. limit changes in center position and radius
-        #     # Step 3.2.5. check fit plausability / quality
-        #     # Step 4.     if fit is good, add circle to tree. Also update
-        #     #             base_circle_index
-        #     # append circ_iter at the beginning of the list
-        #     tree["circles"].insert(0, circ_iter)
-        #     tree["base_circle_index"] += 1
-        # return tree
+        return vertices, triangles
 
     def __str__(self) -> str:
-        return f"Tree: {len(self.circles)} circles, {len(self.points) if self.points is not None else 0} points"
+        return f"Tree with {len(self.circles)} circles"

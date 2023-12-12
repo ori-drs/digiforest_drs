@@ -2,6 +2,7 @@ debug_level: 0
 
 base_frame_id: "base"
 payload_cloud_topic: "/local_mapping/payload_in_local"
+payload_path_topic: "/local_mapping/path"
 tree_meshes_topic: "/realtime_trees/tree_meshes"
 
 cloth_enabled: False
@@ -14,6 +15,7 @@ clustering_crop_upper_bound: 3.0
 clustering_max_cluster_radius: 3.0
 clustering_n_threads: 1
 clustering_cluster_2d: False
+clustering_distance_calc_point_fraction: 0.1
 
 fitting_slice_heights: 0.5
 fitting_slice_thickness: 0.3
