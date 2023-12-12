@@ -522,7 +522,7 @@ class Tree:
 
     @property
     def points(self):
-        if len(self.axes) == 0:
+        if len(self.clusters) == 0:
             raise ValueError("No measurements available yet.")
 
         # TODO ICP in x-y-plane to align all points
@@ -746,11 +746,11 @@ class Tree:
             self.circles = [t["circle"] for t in circle_stack]
             self.reconstructed = True
             if save_debug_results:
-                self.slice_points = ([t["slice_points"] for t in circle_stack],)
-                self.hough_points = ([t["hough_points"] for t in circle_stack],)
-                self.hough_circles = ([t["hough_circle"] for t in circle_stack],)
-                self.hough_pixels = ([t["hough_pixels"] for t in circle_stack],)
-                self.hough_votes = ([t["votes"] for t in circle_stack],)
+                self.slice_points = [t["slice_points"] for t in circle_stack]
+                self.hough_points = [t["hough_points"] for t in circle_stack]
+                self.hough_circles = [t["hough_circle"] for t in circle_stack]
+                self.hough_pixels = [t["hough_pixels"] for t in circle_stack]
+                self.hough_votes = [t["votes"] for t in circle_stack]
 
             # reapply rotation and translation
             self.apply_transform(center, rot_mat)

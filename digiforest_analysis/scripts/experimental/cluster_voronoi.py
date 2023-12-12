@@ -1,3 +1,4 @@
+from typing import List
 import digiforest_analysis.tasks.tree_segmentation as ts
 from digiforest_analysis.tasks.tree_reconstruction import Tree
 from digiforest_analysis.utils.io import load
@@ -68,13 +69,13 @@ if __name__ == "__main__":
 
     # ground_seg = gs.GroundSegmentation(debug_level=0, method="csf", cell_size=2)
     # _, forest_cloud, cloth = ground_seg.process(cloud=cloud, export_cloth=True)
-    tree_seg = ts.TreeSegmentation(debug_level=2, clustering_method="voronoi")
+    tree_seg = ts.TreeSegmentation(debug_level=0, clustering_method="voronoi")
     clusters = tree_seg.process(
         cloud=cloud, max_cluster_radius=2, n_threads=1, point_fraction=0.1
     )
 
     # TREE FITTING
-    trees = []
+    trees: List[Tree] = []
     for cluster in clusters:
         tree = Tree(id=cluster["info"]["id"])
         tree.add_cluster(cluster)
@@ -98,8 +99,9 @@ if __name__ == "__main__":
         trees, [clusters["cloud"].point.positions.numpy() for clusters in clusters]
     ):
         verts, tris = tree.generate_mesh()
-        if len(verts) == 0 or len(tris) == 0:
+        if verts is None or tris is None:
             continue
+
         plot_mesh(verts, tris, points)
         print(
             "Tree mesh has {} vertices and {} triangles".format(len(verts), len(tris))
