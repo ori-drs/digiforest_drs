@@ -1,15 +1,13 @@
 #!/usr/bin/env python
 # author: Leonard Freissmuth
 
-from functools import partial
 import os
 import pickle
-import time
 from typing import List, Tuple
 import numpy as np
 import open3d as o3d
-from multiprocessing import Pool
 from scipy.spatial import cKDTree
+from scipy.spatial.transform import Rotation
 
 import rospy
 import tf2_ros
@@ -22,7 +20,7 @@ import message_filters
 
 from digiforest_analysis.tasks.tree_segmentation import TreeSegmentation
 from digiforest_analysis.tasks.ground_segmentation import GroundSegmentation
-from digiforest_analysis.tasks.tree_reconstruction import Tree
+from digiforest_analysis.tasks.tree_reconstruction import Circle, Tree
 from digiforest_analysis.utils.timing import Timer
 
 
@@ -30,10 +28,18 @@ class ForestAnalysis:
     def __init__(self) -> None:
         self.read_params()
         self.setup_ros()
-        self.ts = TreeSegmentation(
+
+        self._tree_segmenter = TreeSegmentation(
             clustering_method=self._clustering_method,
             debug_level=self._debug_level,
         )
+
+        self._tree_manager = TreeManager(
+            self._distance_threshold,
+            self._reco_min_angle_coverage,
+            self._reco_min_distance,
+        )
+
         self.last_pc_header = None
 
         rospy.on_shutdown(self.shutdown_routine)
@@ -48,69 +54,84 @@ class ForestAnalysis:
         )
 
         # Publishers
-        self._tree_meshes_topic = rospy.get_param("~tree_meshes_topic", "~/tree_meshes")
+        self._tree_meshes_topic = rospy.get_param(
+            "~tree_meshes_topic", "digiforest_forest_analysis/tree_meshes"
+        )
         self._debug_clusters_topic = rospy.get_param(
-            "~debug_clusters_topic", "~/debug/clusters"
+            "~debug_clusters_topic", "digiforest_forest_analysis/debug/cluster_clouds"
         )
         self._debug_cluster_labels_topic = rospy.get_param(
-            "~debug_cluster_labels_topic", "~/debug/cluster_labels"
+            "~debug_cluster_labels_topic",
+            "digiforest_forest_analysis/debug/cluster_labels",
         )
 
         self._debug_level = rospy.get_param("~debug_level", 0)
         self._base_frame_id = rospy.get_param("~base_frame_id", "base")
+        self._odom_frame_id = rospy.get_param("~odom_frame_id", "odom_vilens")
+
+        # Tree Manager
+        self._distance_threshold = rospy.get_param(
+            "~tree_manager/distance_threshold", 0.1
+        )
+        self._reco_min_angle_coverage = np.deg2rad(
+            rospy.get_param("~tree_manager/reco_min_angle_coverage", 180)
+        )
+        self._reco_min_distance = rospy.get_param(
+            "~tree_manager/reco_min_distance", 4.0
+        )
 
         # Ground Segmentation
-        self._cloth_enabled = rospy.get_param("~cloth_enabled", False)
-        self._cloth_cell_size = rospy.get_param("~cloth_cell_size", 2)
+        self._cloth_enabled = rospy.get_param("~cloth/enabled", False)
+        self._cloth_cell_size = rospy.get_param("~cloth/cell_size", 2)
 
         # Clustering
-        self._clustering_method = rospy.get_param("~clustering_method", "voronoi")
+        self._clustering_method = rospy.get_param("~clustering/method", "voronoi")
         self._clustering_hough_filter_radius = rospy.get_param(
-            "~clustering_hough_filter_radius", 0.1
+            "~clustering/hough_filter_radius", 0.1
         )
         self._clustering_crop_lower_bound = rospy.get_param(
-            "~clustering_crop_lower_bound", 5.0
+            "~clustering/crop_lower_bound", 5.0
         )
         self._clustering_crop_upper_bound = rospy.get_param(
-            "~clustering_crop_upper_bound", 8.0
+            "~clustering/crop_upper_bound", 8.0
         )
         self._clustering_max_cluster_radius = rospy.get_param(
-            "~clustering_max_cluster_radius", 3.0
+            "~clustering/max_cluster_radius", 3.0
         )
-        self._clustering_n_threads = rospy.get_param("~clustering_n_threads", 8)
-        self._clustering_cluster_2d = rospy.get_param("~clustering_cluster_2d", False)
+        self._clustering_n_threads = rospy.get_param("~clustering/n_threads", 8)
+        self._clustering_cluster_2d = rospy.get_param("~clustering/cluster_2d", False)
         self._clustering_distance_calc_point_fraction = rospy.get_param(
-            "~clustering_distance_calc_point_fraction", 0.1
+            "~clustering/distance_calc_point_fraction", 0.1
         )
 
         # Fitting
-        self._fitting_slice_heights = rospy.get_param("~fitting_slice_heights", 0.5)
-        self._fitting_slice_thickness = rospy.get_param("~fitting_slice_thickness", 0.3)
-        self._fitting_outlier_radius = rospy.get_param("~fitting_outlier_radius", 0.02)
+        self._fitting_slice_heights = rospy.get_param("~fitting/slice_heights", 0.5)
+        self._fitting_slice_thickness = rospy.get_param("~fitting/slice_thickness", 0.3)
+        self._fitting_outlier_radius = rospy.get_param("~fitting/outlier_radius", 0.02)
         self._fitting_max_center_deviation = rospy.get_param(
-            "~fitting_max_center_deviation", 0.05
+            "~fitting/max_center_deviation", 0.05
         )
         self._fitting_max_radius_deviation = rospy.get_param(
-            "~fitting_max_radius_deviation", 0.05
+            "~fitting/max_radius_deviation", 0.05
         )
         self._fitting_filter_min_points = rospy.get_param(
-            "~fitting_filter_min_points", 10
+            "~fitting/filter_min_points", 10
         )
-        self._fitting_min_hough_vote = rospy.get_param("~fitting_min_hough_vote", 0.1)
-        self._fitting_grid_res = rospy.get_param("~fitting_grid_res", 0.01)
-        self._fitting_point_ratio = rospy.get_param("~fitting_point_ratio", 0.2)
+        self._fitting_min_hough_vote = rospy.get_param("~fitting/min_hough_vote", 0.1)
+        self._fitting_grid_res = rospy.get_param("~fitting/grid_res", 0.01)
+        self._fitting_point_ratio = rospy.get_param("~fitting/point_ratio", 0.2)
         self._fitting_entropy_weighting = rospy.get_param(
-            "~fitting_entropy_weighting", 10.0
+            "~fitting/entropy_weighting", 10.0
         )
         self._fitting_max_consecutive_fails = rospy.get_param(
-            "~fitting_max_consecutive_fails", 3
+            "~fitting/max_consecutive_fails", 3
         )
-        self._fitting_max_height = rospy.get_param("~fitting_max_height", 10.0)
-        self._fitting_save_points = rospy.get_param("~fitting_save_points", True)
+        self._fitting_max_height = rospy.get_param("~fitting/max_height", 10.0)
+        self._fitting_save_points = rospy.get_param("~fitting/save_points", True)
         self._fitting_save_debug_results = rospy.get_param(
-            "~fitting_save_debug_results", False
+            "~fitting/save_debug_results", False
         )
-        self._fitting_n_threads = rospy.get_param("~fitting_n_threads", 1)
+        self._fitting_n_threads = rospy.get_param("~fitting/n_threads", 1)
 
         # Internals
         self._tf_buffer = None
@@ -132,10 +153,10 @@ class ForestAnalysis:
         self._sub_payload_info = message_filters.Subscriber(
             self._payload_path_topic, Path
         )
-        self._ts = message_filters.TimeSynchronizer(
+        self._tree_segmenter = message_filters.TimeSynchronizer(
             [self._sub_payload_cloud, self._sub_payload_info], 10
         )
-        self._ts.registerCallback(self.payload_with_path_callback)
+        self._tree_segmenter.registerCallback(self.payload_with_path_callback)
 
         # Publishers
         self._pub_tree_meshes = rospy.Publisher(
@@ -167,15 +188,15 @@ class ForestAnalysis:
         vertices: np.ndarray,
         triangles: np.ndarray,
         id: int = None,
+        frame_id: str = None,
     ) -> Marker:
         if vertices.shape[0] == 0:
             return None
 
         mesh_msg = Marker()
-
-        mesh_msg.header.frame_id = self._base_frame_id
+        mesh_msg.header.frame_id = frame_id if frame_id else self._base_frame_id
         mesh_msg.header.stamp = self.last_pc_header.stamp  # rospy.Time.now()
-        mesh_msg.ns = "realtime_trees"
+        mesh_msg.ns = "realtime_trees/meshes"
         mesh_msg.id = id if id is not None else np.random.randint(0, 100000)
         mesh_msg.type = Marker.TRIANGLE_LIST
         mesh_msg.action = Marker.ADD
@@ -240,10 +261,11 @@ class ForestAnalysis:
             marker = Marker()
             marker.header.frame_id = self.last_pc_header.frame_id
             marker.header.stamp = self.last_pc_header.stamp
-            marker.ns = "realtime_trees"
+            marker.ns = "realtime_trees/markers"
             marker.id = i
             marker.type = Marker.TEXT_VIEW_FACING
             marker.action = Marker.ADD
+
             marker.pose.position.x = location[0]
             marker.pose.position.y = location[1]
             marker.pose.position.z = location[2]
@@ -301,9 +323,8 @@ class ForestAnalysis:
                     _, _, cloth = ground_seg.process(cloud=cloud, export_cloth=True)
             else:
                 cloth = None
-            TIME = time.time()
             with timer("Clusterting"):
-                clusters = self.ts.process(
+                clusters = self._tree_segmenter.process(
                     cloud=cloud,
                     cloth=cloth,
                     hough_filter_radius=self._clustering_hough_filter_radius,
@@ -323,33 +344,15 @@ class ForestAnalysis:
                     labels=[f"tree{str(c['info']['id']).zfill(3)}" for c in clusters],
                     locations=[c["info"]["axis"]["center"] for c in clusters],
                 )
-            print(f"Clustering took {time.time() - TIME} seconds")
             with timer("Fitting"):
-                tree_from_cluster = partial(
-                    Tree.reconstruct,
-                    slice_heights=self._fitting_slice_heights,
-                    slice_thickness=self._fitting_slice_thickness,
-                    outlier_radius=self._fitting_outlier_radius,
-                    max_center_deviation=self._fitting_max_center_deviation,
-                    max_radius_deviation=self._fitting_max_radius_deviation,
-                    filter_min_points=self._fitting_filter_min_points,
-                    min_hough_vote=self._fitting_min_hough_vote,
-                    grid_res=self._fitting_grid_res,
-                    point_ratio=self._fitting_point_ratio,
-                    entropy_weighting=self._fitting_entropy_weighting,
-                    max_consecutive_fails=self._fitting_max_consecutive_fails,
-                    max_height=self._fitting_max_height,
-                    save_points=self._fitting_save_points,
-                    save_debug_results=self._fitting_save_debug_results,
-                    debug_level=self._debug_level,
+                path = np.array(
+                    [
+                        [p.pose.position.x, p.pose.position.y, p.pose.position.z]
+                        for p in path.poses
+                    ]
                 )
-                trees = []
-                if self._fitting_n_threads == 1:
-                    for cluster in clusters:
-                        trees.append(tree_from_cluster(cluster))
-                else:
-                    with Pool(processes=self._fitting_n_threads) as pool:
-                        trees = pool.map(tree_from_cluster, clusters)
+                self._tree_manager.add_clusters_with_path(clusters, path)
+                self.publish_tree_manager_state(rotation, translation)
 
             if self._debug_level > 1:
                 with timer("saving to disk"):
@@ -359,8 +362,6 @@ class ForestAnalysis:
                     else:
                         for f in os.listdir(directory):
                             os.remove(os.path.join(directory, f))
-                    for cluster, tree in zip(clusters, trees):
-                        cluster["tree"] = tree
                     for cluster in clusters:
                         with open(
                             os.path.join(
@@ -371,19 +372,90 @@ class ForestAnalysis:
                         ) as file:
                             pickle.dump(cluster, file)
 
-            with timer("meshing"):
-                trees = [t for t in trees if len(t.circles)]
-                mesh_array = MarkerArray()
-                for tree in trees:
-                    tree.apply_transform(translation, rotation)
-                    verts, tris = tree.generate_mesh()
-                    mesh_msg = self.genereate_mesh_msg(verts, tris)
-                    if mesh_msg is not None:
-                        mesh_array.markers.append(mesh_msg)
-                self._pub_tree_meshes.publish(mesh_array)
-
         rospy.loginfo(timer)
-        rospy.loginfo(f"Done: Found {len(trees)} trees")
+
+    def publish_tree_manager_state(
+        self, rotation: np.ndarray = None, translation: np.ndarray = None
+    ):
+        label_texts = []
+        label_positions = []
+        mesh_messages = MarkerArray()
+        for tree, reco_flags, coverage_angle in zip(
+            self._tree_manager.trees,
+            self._tree_manager.tree_reco_flags,
+            self._tree_manager.tree_coverate_angles,
+        ):
+            label_texts.append(
+                f"##### tree{str(tree.id).zfill(3)} #####\n"
+                + f"angle:    {np.rad2deg(coverage_angle):.0f} deg\n"
+                + f"angle_flag:    {reco_flags['angle_flag']}\n"
+                + f"distance_flag:  {reco_flags['distance_flag']}"
+            )
+            label_positions.append(tree.clusters[0]["info"]["axis"]["center"])
+
+            if tree.reconstructed:
+                verts, tris = tree.generate_mesh()
+                if rotation is not None and translation is not None:
+                    verts = self.apply_transform(
+                        verts, translation, rotation, inverse=False
+                    )
+                mesh_messages.markers.append(
+                    self.genereate_mesh_msg(
+                        verts, tris, id=tree.id, frame_id=self._base_frame_id
+                    )
+                )
+            else:
+                cylinder_height = (
+                    self._clustering_crop_upper_bound
+                    - self._clustering_crop_lower_bound
+                )
+                verts, tris = self._tree_manager.generate_tree_placeholder(
+                    tree.id, cylinder_height
+                )
+                if rotation is not None and translation is not None:
+                    verts = self.apply_transform(
+                        verts, translation, rotation, inverse=False
+                    )
+                mesh_messages.markers.append(
+                    self.genereate_mesh_msg(
+                        verts, tris, id=tree.id, frame_id=self._base_frame_id
+                    )
+                )
+
+            self._pub_tree_meshes.publish(mesh_messages)
+            self.publish_cluster_labels(label_texts, label_positions)
+
+    def apply_transform(
+        self,
+        points: np.ndarray,
+        translation: np.ndarray,
+        rotation: np.ndarray,
+        inverse: bool = False,
+    ) -> np.ndarray:
+        """Transforms the given points by the given translation and rotation.
+        Optionally performs the inverse transformation.
+
+        Args:
+            points (np.ndarray): Nx3 array of points to be transformed
+            translation (np.ndarray): 3x1 array of translation
+            rotation (np.ndarray): 3x3 rotation matrix or 4x1 quaternion
+            inverse (bool, optional): Flag to calculate inverse. Defaults to False.
+
+        Returns:
+            np.ndarray: Nx3 array of transformed points
+        """
+        if rotation.shape[0] == 4:
+            rot_mat = Rotation.from_quat(rotation).as_matrix()
+        elif rotation.shape == (3, 3):
+            rot_mat = rotation
+        else:
+            raise ValueError("rotation must be given as 3x3 matrix or quaternion")
+        if inverse:
+            points = (points - translation) @ rot_mat
+        else:
+            points = points @ rot_mat.T + translation
+
+        return points
 
     def shutdown_routine(self, *args):
         """Executes the operations before killing the mission analysis procedures"""
@@ -416,6 +488,7 @@ class TreeManager:
 
         self.tree_locations: List[np.ndarray] = []  # for KD tree lookup
         self.tree_reco_flags: List[List[bool]] = []
+        self.tree_coverate_angles: List[float] = []
         self.trees: List[Tree] = []
         self.tree_kd_tree: cKDTree = None
 
@@ -432,7 +505,8 @@ class TreeManager:
         new_tree.add_cluster(cluster)
         self.tree_locations.append(cluster["info"]["axis"]["center"])
         self.trees.append(new_tree)
-        self.tree_reco_flags.append([False, False])  # angle converage and distance
+        self.tree_reco_flags.append({"angle_flag": False, "distance_flag": False})
+        self.tree_coverate_angles.append(0.0)
         self._tree_id_counter += 1
 
     def update_kd_tree(self):
@@ -461,6 +535,8 @@ class TreeManager:
             new_clusters = np.array(clusters)[new_clusters_mask]
             existing_clusters = np.array(clusters)[~new_clusters_mask]
             cluster_correspondences = indices[~new_clusters_mask]
+
+            print(f"Found {len(existing_clusters)} matches")
 
             # add clusters to existing trees
             for cluster, tree_index in zip(existing_clusters, cluster_correspondences):
@@ -547,25 +623,42 @@ class TreeManager:
 
         return angle_from, angle_to, min_distance, max_distance
 
-    def check_angle_coverage(self, angles: List[Tuple[float]]) -> bool:
+    def compute_angle_coverage(self, intervals: List[Tuple[float]]) -> float:
+        """Calculates the coverd angle of the union of the given angle intervals.
+
+        Args:
+            intervals (List[Tuple[float]]): Tuple of angles. Each tuple contains two
+                angles defining the start and end angle of an arc wrt. the global
+                x-axis.
+
+
+        Returns:
+            float: coverage angle in rad
+        """
+        angle_accumulator = np.zeros(360, dtype=bool)
+        for angle_from, angle_to in intervals:
+            angle_from = int(np.around(np.rad2deg(angle_from)))
+            angle_to = int(np.around(np.rad2deg(angle_to)))
+            angle_accumulator[angle_from:angle_to] = True
+        return np.deg2rad(angle_accumulator.sum())
+
+    def check_angle_coverage(self, intervals: List[Tuple[float]], tree_id: int) -> bool:
         """Checks if the union of angle intervals given by the list of tuples is greater
         than the reco_min_angle_coverage parameter.
 
         Args:
-            angles (List[Tuple[float]]): List of tuples of angles. Each tuple contains
-                two angles defining the start and end angle of an arc wrt. the global
-                x-axis.
+            intervals (List[Tuple[float]]): List of tuples of angles. Each tuple
+                contains  two angles defining the start and end angle of an arc wrt.
+                the global x-axis.
+            tree_id (int): ID of the tree the angle intervals belong to.
 
         Returns:
             bool: True if the union of intervals is large enough, False otherwise.
         """
-        angle_accumulator = np.zeros(360, dtype=bool)
-        for angle_from, angle_to in angles:
-            angle_from = int(np.around(np.rad2deg(angle_from)))
-            angle_to = int(np.around(np.rad2deg(angle_to)))
-            angle_accumulator[angle_from:angle_to] = True
+        coverage_angle = self.compute_angle_coverage(intervals)
+        self.tree_coverate_angles[tree_id] = coverage_angle
 
-        return angle_accumulator.sum() >= np.rad2deg(self.reco_min_angle_coverage)
+        return coverage_angle >= self.reco_min_angle_coverage
 
     def check_distance_coverage(self, distances: List[Tuple[float]]) -> bool:
         """Checks if the distances given by the list of tuples are covered by the
@@ -582,6 +675,34 @@ class TreeManager:
         distances = np.array(distances)
         d_min = np.min(distances[:, 0])
         return d_min <= self.reco_min_distance
+
+    def generate_tree_placeholder(
+        self, tree_id: int, cylinder_height: float = 5.0
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Generates a mesh for a tree placeholder represented as a list of vertices and
+        a list of triangle indices.
+        The placeholder is a cylinder represents the tree axis as a cylinder with the
+        radius that has been determined with hough fitting during clustering and
+        alignment accordint to the axis determined during fitting.
+
+        Args:
+            tree_id (int): unique id of the tree
+            cylinder_height (float, optional): height of the cylinder. Defaults to 5.0.
+
+        Returns:
+            np.ndarray: Nx3 array of vertices
+            np.ndarray: Mx3 array of triangle indices
+        """
+        axis = self.trees[tree_id].axis
+        lower_center = axis["center"]
+        cylinder_radius = axis["radius"]
+        cylinder_axis = axis["rot_mat"][:, 2]
+        upper_center = lower_center + cylinder_axis * cylinder_height
+
+        bottom_circle = Circle(lower_center, cylinder_radius, cylinder_axis)
+        top_circle = Circle(upper_center, cylinder_radius, cylinder_axis)
+
+        return bottom_circle.genereate_cone_frustum_mesh(top_circle)
 
     def try_reconstructions(self) -> bool:
         """Checks all trees in the data base if they satisfy the conditions to be
@@ -602,14 +723,15 @@ class TreeManager:
                 for cluster in tree.clusters
             ]
 
-            if not self.check_angle_coverage([c[:2] for c in coverages]):
+            if not self.check_angle_coverage([c[:2] for c in coverages], tree.id):
                 continue
-            self.tree_reco_flags[i][0] = True
+            self.tree_reco_flags[i]["angle_flag"] = True
 
             if not self.check_distance_coverage([c[2:] for c in coverages]):
                 continue
-            self.tree_reco_flags[i][1] = True
+            self.tree_reco_flags[i]["distance_flag"] = True
 
+            print(f"Reconstructing tree {tree.id}")
             reco_happened |= tree.reconstruct()
 
         return reco_happened

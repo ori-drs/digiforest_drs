@@ -1,34 +1,43 @@
 debug_level: 0
 
 base_frame_id: "base"
+odom_frame_id: "odom_vilens"
 payload_cloud_topic: "/local_mapping/payload_in_local"
 payload_path_topic: "/local_mapping/path"
 tree_meshes_topic: "/realtime_trees/tree_meshes"
 
-cloth_enabled: False
-cloth_cell_size: 2
+tree_manager:
+  distance_threshold: 0.1
+  reco_min_angle_coverage: 180
+  reco_min_distance: 4.0
 
-clustering_method: "voronoi"
-clustering_hough_filter_radius: 0.1
-clustering_crop_lower_bound: 1.0
-clustering_crop_upper_bound: 3.0
-clustering_max_cluster_radius: 3.0
-clustering_n_threads: 1
-clustering_cluster_2d: False
-clustering_distance_calc_point_fraction: 0.1
+cloth:
+  enabled: False
+  cell_size: 2
 
-fitting_slice_heights: 0.5
-fitting_slice_thickness: 0.3
-fitting_outlier_radius: 0.02
-fitting_max_center_deviation: 0.05
-fitting_max_radius_deviation: 0.05
-fitting_filter_min_points: 10
-fitting_min_hough_vote: 0.1
-fitting_grid_res: 0.01
-fitting_point_ratio: 0.2
-fitting_entropy_weighting: 10.0
-fitting_max_consecutive_fails: 3
-fitting_max_height: 10.0
-fitting_save_points: True
-fitting_save_debug_results: True
-fitting_n_threads: 1
+clustering:
+  method: "voronoi"
+  hough_filter_radius: 0.1
+  crop_lower_bound: 1.0
+  crop_upper_bound: 3.0
+  max_cluster_radius: 3.0
+  n_threads: 1
+  cluster_2d: False
+  distance_calc_point_fraction: 0.1
+
+fitting:
+  slice_heights: 0.5
+  slice_thickness: 0.3
+  outlier_radius: 0.02
+  max_center_deviation: 0.05
+  max_radius_deviation: 0.05
+  filter_min_points: 10
+  min_hough_vote: 0.1
+  grid_res: 0.01
+  point_ratio: 0.2
+  entropy_weighting: 10.0
+  max_consecutive_fails: 3
+  max_height: 10.0
+  save_points: True
+  save_debug_results: True
+  n_threads: 1  
