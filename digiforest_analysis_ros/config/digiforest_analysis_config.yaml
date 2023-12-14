@@ -7,7 +7,7 @@ payload_path_topic: "/local_mapping/path"
 tree_meshes_topic: "/digiforest_forest_analysis/tree_meshes"
 
 tree_manager:
-  distance_threshold: 0.5
+  distance_threshold: 1.0
   reco_min_angle_coverage: 180
   reco_min_distance: 4.0
 
@@ -17,7 +17,7 @@ cloth:
 
 clustering:
   method: "voronoi"
-  hough_filter_radius: 0.1
+  hough_filter_radius: 0.1 
   crop_lower_bound: 1.0
   crop_upper_bound: 3.0
   max_cluster_radius: 3.0

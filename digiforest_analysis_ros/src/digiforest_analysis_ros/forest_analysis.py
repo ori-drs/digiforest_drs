@@ -3,11 +3,12 @@
 
 import os
 import pickle
-from typing import List, Tuple
 import numpy as np
 import open3d as o3d
+import pandas as pd
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
+from typing import List, Tuple
 
 import rospy
 import tf2_ros
@@ -343,10 +344,6 @@ class ForestAnalysis:
                 colors = [c["info"]["color"] for c in clusters]
                 # colors = [np.random.rand(3) for c in clusters]
                 self.publish_colored_pointclouds(clouds, colors)
-                self.publish_cluster_labels(
-                    labels=[f"tree{str(c['info']['id']).zfill(3)}" for c in clusters],
-                    locations=[c["info"]["axis"]["center"] for c in clusters],
-                )
             with timer("Tree Manager"):
                 path = np.array(
                     [
@@ -354,10 +351,15 @@ class ForestAnalysis:
                         for p in path.poses
                     ]
                 )
-                self._tree_manager.add_clusters_with_path(clusters, path)
+                self._tree_manager.add_clusters_with_path(
+                    clusters, path, time_stamp=self.last_pc_header.stamp
+                )
 
             with timer("Publishing"):
                 self.publish_tree_manager_state(rotation, translation)
+                self._tree_manager.write_results(
+                    "/home/ori/git/digiforest_drs/trees/logs"
+                )
 
             if self._debug_level > 1:
                 with timer("saving to disk"):
@@ -382,54 +384,47 @@ class ForestAnalysis:
     def publish_tree_manager_state(
         self, rotation: np.ndarray = None, translation: np.ndarray = None
     ):
-        with open(
-            "/home/ori/git/digiforest_drs/trees/logs/tree"
-            + str(self.last_pc_header.stamp)
-            + ".txt",
-            "w",
-        ) as file:
-            label_texts = []
-            label_positions = []
-            mesh_messages = MarkerArray()
-            for tree, reco_flags, coverage_angle in zip(
-                self._tree_manager.trees,
-                self._tree_manager.tree_reco_flags,
-                self._tree_manager.tree_coverage_angles,
-            ):
-                label_texts.append(
-                    f"##### tree{str(tree.id).zfill(3)} #####\n"
-                    + f"angle:     {np.rad2deg(coverage_angle):.0f} deg\n"
-                    + f"angle_flag:    {reco_flags['angle_flag']}\n"
-                    + f"distance_flag:  {reco_flags['distance_flag']}\n"
+        label_texts = []
+        label_positions = []
+        mesh_messages = MarkerArray()
+        for tree, reco_flags, coverage_angle in zip(
+            self._tree_manager.trees,
+            self._tree_manager.tree_reco_flags,
+            self._tree_manager.tree_coverage_angles,
+        ):
+            label_texts.append(
+                f"##### tree{str(tree.id).zfill(3)} #####\n"
+                + f"angle:     {np.rad2deg(coverage_angle):.0f} deg\n"
+                + f"angle_flag:    {reco_flags['angle_flag']}\n"
+                + f"distance_flag:  {reco_flags['distance_flag']}\n"
+            )
+            label_positions.append(tree.axis["center"])
+
+            if tree.reconstructed:
+                verts, tris = tree.generate_mesh()
+                if rotation is not None and translation is not None:
+                    verts = self.apply_transform(
+                        verts, translation, rotation, inverse=False
+                    )
+                mesh_messages.markers.append(
+                    self.genereate_mesh_msg(
+                        verts, tris, id=tree.id, frame_id=self._base_frame_id
+                    )
                 )
-                file.write(label_texts[-1])
-                label_positions.append(tree.axis["center"])
-
-                if tree.reconstructed:
-                    verts, tris = tree.generate_mesh()
-                    if rotation is not None and translation is not None:
-                        verts = self.apply_transform(
-                            verts, translation, rotation, inverse=False
-                        )
-                    mesh_messages.markers.append(
-                        self.genereate_mesh_msg(
-                            verts, tris, id=tree.id, frame_id=self._base_frame_id
-                        )
+            else:
+                verts, tris = self._tree_manager.generate_tree_placeholder(tree.id)
+                if rotation is not None and translation is not None:
+                    verts = self.apply_transform(
+                        verts, translation, rotation, inverse=False
                     )
-                else:
-                    verts, tris = self._tree_manager.generate_tree_placeholder(tree.id)
-                    if rotation is not None and translation is not None:
-                        verts = self.apply_transform(
-                            verts, translation, rotation, inverse=False
-                        )
-                    mesh_messages.markers.append(
-                        self.genereate_mesh_msg(
-                            verts, tris, id=tree.id, frame_id=self._base_frame_id
-                        )
+                mesh_messages.markers.append(
+                    self.genereate_mesh_msg(
+                        verts, tris, id=tree.id, frame_id=self._base_frame_id
                     )
+                )
 
-                self._pub_tree_meshes.publish(mesh_messages)
-                self.publish_cluster_labels(label_texts, label_positions)
+            self._pub_tree_meshes.publish(mesh_messages)
+            self.publish_cluster_labels(label_texts, label_positions)
 
     def apply_transform(
         self,
@@ -506,6 +501,7 @@ class TreeManager:
         self._kd_tree = None
 
         self._tree_id_counter = 0
+        self._last_cluster_time = None
 
     def _update_kd_tree(self):
         """Updates the KD tree with the current tree centers"""
@@ -582,7 +578,7 @@ class TreeManager:
 
         return np.linalg.norm(meetin_point_1 - meeting_point_2)
 
-    def add_clusters(self, clusters: List[dict]):
+    def add_clusters(self, clusters: List[dict], time_stamp: rospy.Time = None):
         """This function checks every cluster. If a tree close to the detected cluster
         already exists, the cluster is added to the tree. If no tree is close enough, a
         new tree is created. This function updates the KD tree.
@@ -590,7 +586,13 @@ class TreeManager:
         Args:
             clusters (List[dict]): List of clusters as returned by
                 TreeSegmentation.process()
+            time_stamp (rospy.Time, optional): Time stamp of the point cloud. Defaults
+                to None.
         """
+        if time_stamp is not None:
+            for cluster in clusters:
+                cluster["time_stamp"] = time_stamp
+
         if len(self.trees) == 0:
             # create new trees for all clusters and add them to the list
             for cluster in clusters:
@@ -598,42 +600,32 @@ class TreeManager:
         else:
             # for all clusters check if tree at this coordinate already exists
             with timer("Finding Correspondences"):
-                new_clusters = []
-                existing_clusters = []
-                cluster_correspondences = []
-                candidate_axes = [c["info"]["axis"] for c in clusters]
-                existing_axes = [tree.axis for tree in self.trees]
-                for i, candidate_axis in enumerate(candidate_axes):
-                    correspondence = -1
-                    for j, existing_axis in enumerate(existing_axes):
-                        axis_length = self.crop_upper_bound - self.crop_lower_bound
-                        candidate_axis["axis_length"] = axis_length
-                        existing_axis["axis_length"] = axis_length
-                        distance = self.distance_line_to_line(
-                            candidate_axis, existing_axis
-                        )
-                        if distance < self.distance_threshold:
-                            correspondence = j
-                            break
-                    if correspondence != -1:
-                        existing_clusters.append(clusters[i])
-                        cluster_correspondences.append(correspondence)
+                num_existing, num_new = 0, 0
+                candiate_centers = [c["info"]["axis"]["center"] for c in clusters]
+                _, existing_indices = self._kd_tree.query(candiate_centers)
+                for i_candidate, i_existing in enumerate(existing_indices):
+                    axis_length = self.crop_upper_bound - self.crop_lower_bound
+                    candidate_axis = clusters[i_candidate]["info"]["axis"]
+                    candidate_axis["axis_length"] = axis_length
+                    existing_axis = self.trees[i_existing].axis
+                    existing_axis["axis_length"] = axis_length
+
+                    distance = self.distance_line_to_line(candidate_axis, existing_axis)
+                    if distance < self.distance_threshold:
+                        self.trees[i_existing].add_cluster(clusters[i_candidate])
+                        num_existing += 1
                     else:
-                        new_clusters.append(clusters[i])
+                        self._new_tree_from_cluster(clusters[i_candidate])
+                        num_new += 1
 
-            print(f"Found {len(existing_clusters)} matches")
+            print(f"Found {num_existing} existing and {num_new} new clusters")
 
-            # add clusters to existing trees
-            for cluster, tree_index in zip(existing_clusters, cluster_correspondences):
-                self.trees[tree_index].add_cluster(cluster)
-
-            # create new trees for non-existing clusters and add them to the list
-            for cluster in new_clusters:
-                self._new_tree_from_cluster(cluster)
-
+        self._update_kd_tree()
         self.try_reconstructions()
 
-    def add_clusters_with_path(self, clusters: List[dict], path: np.ndarray):
+    def add_clusters_with_path(
+        self, clusters: List[dict], path: np.ndarray, time_stamp: rospy.Time = None
+    ):
         """This function checks every cluster and performs the same as add_clusters().
         In addition, it calculates the covered angle and covered distance of the sensor
         to the tree axis for every cluster and adds this information to the
@@ -645,7 +637,11 @@ class TreeManager:
             path (np.ndarray): Nx7 array describing consecutive 7D poses of the sensor.
                 The first three columns are the x, y, z coordinates of the position. The
                 last four columns are the x, y, z, w quaternions describing orientation.
+            time_stampe (rospy.Time, optional): Time stamp of the point cloud. Defaults
+                to None.
         """
+        if time_stamp is not None:
+            self._last_cluster_time = time_stamp
 
         for cluster in clusters:
             angle_from, angle_to, d_min, d_max = self.calculate_coverage(cluster, path)
@@ -656,7 +652,7 @@ class TreeManager:
                 "distance_max": d_max,
             }
 
-        self.add_clusters(clusters)
+        self.add_clusters(clusters, time_stamp)
 
     def calculate_coverage(self, cluster: dict, path: np.ndarray) -> Tuple[float]:
         """Calculates the covered angle of the sensor to the tree axis for a given
@@ -820,3 +816,54 @@ class TreeManager:
             reco_happened |= tree.reconstruct()
 
         return reco_happened
+
+    def write_results(self, path: str):
+        """Writes the tree data base to a csv file
+
+        Args: path (str, optional): Path to the directory where the csv and xlsx file is
+            saved.
+        """
+        if not os.path.exists(os.path.join(path, "csv")):
+            os.makedirs(os.path.join(path, "csv"))
+        if not os.path.exists(os.path.join(path, "xlsx")):
+            os.makedirs(os.path.join(path, "xlsx"))
+        file_name = (
+            "TreeManagerState_"
+            + f"{self._last_cluster_time.secs}_{self._last_cluster_time.nsecs}"
+        )
+        file_name_csv = file_name + ".csv"
+        file_name_xlsx = file_name + ".xlsx"
+
+        # write header
+        columns = [
+            "tree_id",
+            "location_x",
+            "location_y",
+            "number_clusters",
+            "coverage_angle",
+            "DBH",
+            "number_bends",
+            "clear_wood",
+        ]
+        # write tree data
+        data = []
+        for tree in self.trees:
+            # TODO replace with accurate calculation of DBH
+            tree.DBH = tree.axis["radius"] * 2
+            data.append(
+                [
+                    tree.id,
+                    tree.axis["center"][0],
+                    tree.axis["center"][1],
+                    len(tree.clusters),
+                    np.rad2deg(self.tree_coverage_angles[tree.id]),
+                    tree.DBH,
+                    tree.number_bends,
+                    tree.clear_wood,
+                ]
+            )
+        df = pd.DataFrame(data, columns=columns)
+        df.to_csv(
+            os.path.join(path, "csv", file_name_csv), float_format="%.3f", index=False
+        )
+        df.to_excel(os.path.join(path, "xlsx", file_name_xlsx), index=False)

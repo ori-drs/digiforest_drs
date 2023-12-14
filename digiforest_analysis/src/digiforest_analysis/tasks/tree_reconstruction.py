@@ -496,6 +496,9 @@ class Tree:
         self.hough_votes = None  # just for debugging
 
         self.clusters = []
+        self.DBH = None
+        self.number_bends = None
+        self.clear_wood = None
 
     def add_cluster(self, cluster: dict):
         self.clusters.append(cluster)
