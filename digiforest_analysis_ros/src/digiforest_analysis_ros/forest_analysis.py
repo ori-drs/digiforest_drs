@@ -379,7 +379,7 @@ class ForestAnalysis:
                         ) as file:
                             pickle.dump(cluster, file)
 
-        rospy.loginfo(timer)
+        rospy.loginfo("Timing results:\n" + str(timer))
 
     def publish_tree_manager_state(
         self, rotation: np.ndarray = None, translation: np.ndarray = None
@@ -423,8 +423,8 @@ class ForestAnalysis:
                     )
                 )
 
-            self._pub_tree_meshes.publish(mesh_messages)
-            self.publish_cluster_labels(label_texts, label_positions)
+        self._pub_tree_meshes.publish(mesh_messages)
+        self.publish_cluster_labels(label_texts, label_positions)
 
     def apply_transform(
         self,
@@ -618,7 +618,7 @@ class TreeManager:
                         self._new_tree_from_cluster(clusters[i_candidate])
                         num_new += 1
 
-            print(f"Found {num_existing} existing and {num_new} new clusters")
+            rospy.loginfo(f"Found {num_existing} existing and {num_new} new clusters")
 
         self._update_kd_tree()
         self.try_reconstructions()
@@ -812,7 +812,7 @@ class TreeManager:
                 continue
             self.tree_reco_flags[i]["distance_flag"] = True
 
-            print(f"Reconstructing tree {tree.id}")
+            rospy.loginfo(f"Reconstructing tree {tree.id}")
             reco_happened |= tree.reconstruct()
 
         return reco_happened

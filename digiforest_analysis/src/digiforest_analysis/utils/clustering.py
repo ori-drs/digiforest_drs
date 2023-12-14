@@ -423,6 +423,7 @@ def voronoi(  # noqa: C901
         for i, label in enumerate(unique_labels[1:]):
             labels[labels == label] = i
             filtered_axes.append(axes[label])
-    print(timer)
+    if debug_level > 0:
+        print(timer)
 
     return labels, filtered_axes
