@@ -4,10 +4,10 @@ base_frame_id: "base"
 odom_frame_id: "odom_vilens"
 payload_cloud_topic: "/local_mapping/payload_in_local"
 payload_path_topic: "/local_mapping/path"
-tree_meshes_topic: "/realtime_trees/tree_meshes"
+tree_meshes_topic: "/digiforest_forest_analysis/tree_meshes"
 
 tree_manager:
-  distance_threshold: 0.1
+  distance_threshold: 0.5
   reco_min_angle_coverage: 180
   reco_min_distance: 4.0
 

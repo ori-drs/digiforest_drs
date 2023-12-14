@@ -315,9 +315,7 @@ def voronoi(  # noqa: C901
                 pca.fit(cluster_points)
                 rot_mat = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]]) @ pca.components_
                 if rot_mat[2, 2] < 0:
-                    rot_mat[
-                        :, 1:
-                    ] *= -1  # make sure the z component of the pca is positive
+                    rot_mat[:, 1:] *= -1  # make sure the z component is positive
 
             # convert cluster_points into open3d point cloud and give a random color
             with timer("hough->points to open3d"):

@@ -103,7 +103,7 @@ if __name__ == "__main__":
 
         matplotlib.use("TkAgg")
 
-        num_poses = 10
+        num_poses = 5
         poses = np.random.rand(num_poses, 2) - 0.5
 
         cluster = {"info": {"axis": {"center": np.array([0, 0, 0])}}}

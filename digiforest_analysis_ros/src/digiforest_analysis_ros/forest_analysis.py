@@ -23,6 +23,8 @@ from digiforest_analysis.tasks.ground_segmentation import GroundSegmentation
 from digiforest_analysis.tasks.tree_reconstruction import Circle, Tree
 from digiforest_analysis.utils.timing import Timer
 
+timer = Timer()
+
 
 class ForestAnalysis:
     def __init__(self) -> None:
@@ -38,6 +40,8 @@ class ForestAnalysis:
             self._distance_threshold,
             self._reco_min_angle_coverage,
             self._reco_min_distance,
+            self._clustering_crop_upper_bound,
+            self._clustering_crop_lower_bound,
         )
 
         self.last_pc_header = None
@@ -308,7 +312,6 @@ class ForestAnalysis:
             rospy.logwarn("Could not get transform from odom to sensor", e)
             return
 
-        timer = Timer()
         with timer("all"):
             with timer("conversion"):
                 cloud = self.pc2_to_o3d(point_cloud)
@@ -344,7 +347,7 @@ class ForestAnalysis:
                     labels=[f"tree{str(c['info']['id']).zfill(3)}" for c in clusters],
                     locations=[c["info"]["axis"]["center"] for c in clusters],
                 )
-            with timer("Fitting"):
+            with timer("Tree Manager"):
                 path = np.array(
                     [
                         [p.pose.position.x, p.pose.position.y, p.pose.position.z]
@@ -352,6 +355,8 @@ class ForestAnalysis:
                     ]
                 )
                 self._tree_manager.add_clusters_with_path(clusters, path)
+
+            with timer("Publishing"):
                 self.publish_tree_manager_state(rotation, translation)
 
             if self._debug_level > 1:
@@ -377,53 +382,54 @@ class ForestAnalysis:
     def publish_tree_manager_state(
         self, rotation: np.ndarray = None, translation: np.ndarray = None
     ):
-        label_texts = []
-        label_positions = []
-        mesh_messages = MarkerArray()
-        for tree, reco_flags, coverage_angle in zip(
-            self._tree_manager.trees,
-            self._tree_manager.tree_reco_flags,
-            self._tree_manager.tree_coverate_angles,
-        ):
-            label_texts.append(
-                f"##### tree{str(tree.id).zfill(3)} #####\n"
-                + f"angle:    {np.rad2deg(coverage_angle):.0f} deg\n"
-                + f"angle_flag:    {reco_flags['angle_flag']}\n"
-                + f"distance_flag:  {reco_flags['distance_flag']}"
-            )
-            label_positions.append(tree.clusters[0]["info"]["axis"]["center"])
+        with open(
+            "/home/ori/git/digiforest_drs/trees/logs/tree"
+            + str(self.last_pc_header.stamp)
+            + ".txt",
+            "w",
+        ) as file:
+            label_texts = []
+            label_positions = []
+            mesh_messages = MarkerArray()
+            for tree, reco_flags, coverage_angle in zip(
+                self._tree_manager.trees,
+                self._tree_manager.tree_reco_flags,
+                self._tree_manager.tree_coverage_angles,
+            ):
+                label_texts.append(
+                    f"##### tree{str(tree.id).zfill(3)} #####\n"
+                    + f"angle:     {np.rad2deg(coverage_angle):.0f} deg\n"
+                    + f"angle_flag:    {reco_flags['angle_flag']}\n"
+                    + f"distance_flag:  {reco_flags['distance_flag']}\n"
+                )
+                file.write(label_texts[-1])
+                label_positions.append(tree.axis["center"])
 
-            if tree.reconstructed:
-                verts, tris = tree.generate_mesh()
-                if rotation is not None and translation is not None:
-                    verts = self.apply_transform(
-                        verts, translation, rotation, inverse=False
+                if tree.reconstructed:
+                    verts, tris = tree.generate_mesh()
+                    if rotation is not None and translation is not None:
+                        verts = self.apply_transform(
+                            verts, translation, rotation, inverse=False
+                        )
+                    mesh_messages.markers.append(
+                        self.genereate_mesh_msg(
+                            verts, tris, id=tree.id, frame_id=self._base_frame_id
+                        )
                     )
-                mesh_messages.markers.append(
-                    self.genereate_mesh_msg(
-                        verts, tris, id=tree.id, frame_id=self._base_frame_id
+                else:
+                    verts, tris = self._tree_manager.generate_tree_placeholder(tree.id)
+                    if rotation is not None and translation is not None:
+                        verts = self.apply_transform(
+                            verts, translation, rotation, inverse=False
+                        )
+                    mesh_messages.markers.append(
+                        self.genereate_mesh_msg(
+                            verts, tris, id=tree.id, frame_id=self._base_frame_id
+                        )
                     )
-                )
-            else:
-                cylinder_height = (
-                    self._clustering_crop_upper_bound
-                    - self._clustering_crop_lower_bound
-                )
-                verts, tris = self._tree_manager.generate_tree_placeholder(
-                    tree.id, cylinder_height
-                )
-                if rotation is not None and translation is not None:
-                    verts = self.apply_transform(
-                        verts, translation, rotation, inverse=False
-                    )
-                mesh_messages.markers.append(
-                    self.genereate_mesh_msg(
-                        verts, tris, id=tree.id, frame_id=self._base_frame_id
-                    )
-                )
 
-            self._pub_tree_meshes.publish(mesh_messages)
-            self.publish_cluster_labels(label_texts, label_positions)
+                self._pub_tree_meshes.publish(mesh_messages)
+                self.publish_cluster_labels(label_texts, label_positions)
 
     def apply_transform(
         self,
@@ -468,6 +474,8 @@ class TreeManager:
         distance_threshold: float = 0.1,
         reco_min_angle_coverage: float = 1.5 * np.pi,
         reco_min_distance: float = 4.0,
+        crop_upper_bound: float = 1.0,
+        crop_lower_bound: float = 3.0,
     ) -> None:
         """constructor of the TreeManager class
 
@@ -481,37 +489,98 @@ class TreeManager:
             reco_min_distance (float, optional): Distance in m closer than which the
                 sensor must have visited the tree, so it is reconstructed.
                 Defaults to 4.0.
+            crop_lower_bound (float, optional): Lower bounding height in m used for
+                cropping during clustering.
+            crop_upper_bound (float, optional): Upper bounding height in m used for
+                cropping during clustering.
         """
         self.distance_threshold = distance_threshold
         self.reco_min_angle_coverage = reco_min_angle_coverage
         self.reco_min_distance = reco_min_distance
+        self.crop_upper_bound = crop_upper_bound
+        self.crop_lower_bound = crop_lower_bound
 
-        self.tree_locations: List[np.ndarray] = []  # for KD tree lookup
         self.tree_reco_flags: List[List[bool]] = []
-        self.tree_coverate_angles: List[float] = []
+        self.tree_coverage_angles: List[float] = []
         self.trees: List[Tree] = []
-        self.tree_kd_tree: cKDTree = None
+        self._kd_tree = None
 
         self._tree_id_counter = 0
 
+    def _update_kd_tree(self):
+        """Updates the KD tree with the current tree centers"""
+        centers = [tree.axis["center"] for tree in self.trees]
+        self._kd_tree = cKDTree(centers)
+
     def _new_tree_from_cluster(self, cluster: dict):
-        """adds a new tree given a cluster. THIS DOES NOT UPDATE THE KD TREE!
-        Call self.update_kd_tree() after adding all clusters.
+        """adds a new tree given a cluster.
 
         Args:
             cluster (dict): Dict as in the list returned by TreeSegmentation.process()
         """
         new_tree = Tree(self._tree_id_counter)
         new_tree.add_cluster(cluster)
-        self.tree_locations.append(cluster["info"]["axis"]["center"])
         self.trees.append(new_tree)
         self.tree_reco_flags.append({"angle_flag": False, "distance_flag": False})
-        self.tree_coverate_angles.append(0.0)
+        self.tree_coverage_angles.append(0.0)
         self._tree_id_counter += 1
 
-    def update_kd_tree(self):
-        """reinitializes KD tree. Has to be called after adding new clusters."""
-        self.tree_kd_tree = cKDTree(self.tree_locations)
+    def distance_line_to_line(self, line_1: dict, line_2: dict) -> float:
+        """Calculates the minum distance between two axes. If the keyword "axis_length"
+        is present in the dicts, the closest points are bounded to be between the basis
+        poit of the axis and not further away from the basis point in the z direction
+        of the given rot_mat than the axis_length. Otherwise, the closest points can be
+        anywhere on the axis.
+
+        Args:
+            line1 (dict): Dict with the keys "center", "rot_mat" and optionally
+                "axis_length" describing the first axis.
+            line2 (dict): Dict with the keys "center", "rot_mat" and optionally
+                "axis_length" describing the second axis.
+
+        Returns:
+            float: minimum distance between axes
+        """
+        axis_pnt_1 = line_1["center"]
+        axis_pnt_2 = line_2["center"]
+        axis_dir_1 = line_1["rot_mat"][2, :]
+        axis_dir_2 = line_2["rot_mat"][2, :]
+        normal = np.cross(axis_dir_1, axis_dir_2)
+        normal_length = np.linalg.norm(normal)
+        if np.isclose(normal_length, 0.0):
+            meetin_point_1 = axis_pnt_1
+            # Gram Schmidt
+            meeting_point_2 = axis_pnt_1 - axis_dir_1 * (
+                (axis_pnt_2 - axis_pnt_1) @ axis_dir_1
+            )
+        else:
+            normal /= np.linalg.norm(normal_length)
+            v_normal = np.cross(axis_dir_1, normal)
+            v_normal /= np.linalg.norm(v_normal)
+            w_normal = np.cross(axis_dir_2, normal)
+            w_normal /= np.linalg.norm(w_normal)
+            s = w_normal @ (axis_pnt_2 - axis_pnt_1) / (w_normal @ axis_dir_1)
+            t = v_normal @ (axis_pnt_1 - axis_pnt_2) / (v_normal @ axis_dir_2)
+
+            meetin_point_1 = axis_pnt_1 + s * axis_dir_1
+            meeting_point_2 = axis_pnt_2 + t * axis_dir_2
+
+        if "axis_length" in line_1.keys() and "axis_length" in line_2.keys():
+            axis_len_1 = line_1["axis_length"]
+            axis_len_2 = line_2["axis_length"]
+            pos_1_normalized = (meetin_point_1 - axis_pnt_1) @ axis_dir_1 / axis_len_1
+            pos_2_normalized = (meeting_point_2 - axis_pnt_2) @ axis_dir_2 / axis_len_2
+
+            if pos_1_normalized < 0:
+                meetin_point_1 = axis_pnt_1
+            if pos_1_normalized > 1:
+                meetin_point_1 = axis_pnt_1 + axis_dir_1 * axis_len_1
+            if pos_2_normalized < 0:
+                meeting_point_2 = axis_pnt_2
+            if pos_2_normalized > 1:
+                meeting_point_2 = axis_pnt_2 + axis_dir_2 * axis_len_2
+
+        return np.linalg.norm(meetin_point_1 - meeting_point_2)
 
     def add_clusters(self, clusters: List[dict]):
         """This function checks every cluster. If a tree close to the detected cluster
@@ -528,13 +597,29 @@ class TreeManager:
                 self._new_tree_from_cluster(cluster)
         else:
             # for all clusters check if tree at this coordinate already exists
-            cluster_centers = [c["info"]["axis"]["center"] for c in clusters]
-            distances, indices = self.tree_kd_tree.query(cluster_centers)
-            new_clusters_mask = distances > self.distance_threshold
-
-            new_clusters = np.array(clusters)[new_clusters_mask]
-            existing_clusters = np.array(clusters)[~new_clusters_mask]
-            cluster_correspondences = indices[~new_clusters_mask]
+            with timer("Finding Correspondences"):
+                new_clusters = []
+                existing_clusters = []
+                cluster_correspondences = []
+                candidate_axes = [c["info"]["axis"] for c in clusters]
+                existing_axes = [tree.axis for tree in self.trees]
+                for i, candidate_axis in enumerate(candidate_axes):
+                    correspondence = -1
+                    for j, existing_axis in enumerate(existing_axes):
+                        axis_length = self.crop_upper_bound - self.crop_lower_bound
+                        candidate_axis["axis_length"] = axis_length
+                        existing_axis["axis_length"] = axis_length
+                        distance = self.distance_line_to_line(
+                            candidate_axis, existing_axis
+                        )
+                        if distance < self.distance_threshold:
+                            correspondence = j
+                            break
+                    if correspondence != -1:
+                        existing_clusters.append(clusters[i])
+                        cluster_correspondences.append(correspondence)
+                    else:
+                        new_clusters.append(clusters[i])
 
             print(f"Found {len(existing_clusters)} matches")
 
@@ -546,7 +631,6 @@ class TreeManager:
             for cluster in new_clusters:
                 self._new_tree_from_cluster(cluster)
 
-        self.update_kd_tree()
         self.try_reconstructions()
 
     def add_clusters_with_path(self, clusters: List[dict], path: np.ndarray):
@@ -656,7 +740,7 @@ class TreeManager:
             bool: True if the union of intervals is large enough, False otherwise.
         """
         coverage_angle = self.compute_angle_coverage(intervals)
-        self.tree_coverate_angles[tree_id] = coverage_angle
+        self.tree_coverage_angles[tree_id] = coverage_angle
 
         return coverage_angle >= self.reco_min_angle_coverage
 
@@ -696,7 +780,8 @@ class TreeManager:
         axis = self.trees[tree_id].axis
         lower_center = axis["center"]
         cylinder_radius = axis["radius"]
-        cylinder_axis = axis["rot_mat"][:, 2]
+        cylinder_axis = axis["rot_mat"][2, :]
+        cylinder_height = self.crop_upper_bound - self.crop_lower_bound
         upper_center = lower_center + cylinder_axis * cylinder_height
 
         bottom_circle = Circle(lower_center, cylinder_radius, cylinder_axis)
