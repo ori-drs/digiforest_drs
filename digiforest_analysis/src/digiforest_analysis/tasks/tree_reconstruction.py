@@ -489,11 +489,11 @@ class Tree:
 
         self.reconstructed = False
         self.circles = None
-        self.slice_points = None  # just for debugging
-        self.hough_points = None  # just for debugging
-        self.hough_circles = None  # just for debugging
-        self.hough_pixels = None  # just for debugging
-        self.hough_votes = None  # just for debugging
+        self._slice_points = None  # just for debugging
+        self._hough_points = None  # just for debugging
+        self._hough_circles = None  # just for debugging
+        self._hough_pixels = None  # just for debugging
+        self._hough_votes = None  # just for debugging
 
         self.clusters = []
         self.DBH = None
@@ -553,18 +553,19 @@ class Tree:
         if self.reconstructed:
             for i in range(len(self.circles)):
                 self.circles[i].apply_transform(translation, rotation)
-                if self.hough_circles is not None:
-                    self.hough_circles[i].apply_transform(translation, rotation)
-                if self.slice_points is not None:
-                    self.slice_points[i] = (
-                        self.slice_points[i] @ rot_mat.T + translation.squeeze()
+            for i in range(len(self._hough_circles)):
+                if self._hough_circles is not None:
+                    self._hough_circles[i].apply_transform(translation, rotation)
+                if self._slice_points is not None:
+                    self._slice_points[i] = (
+                        self._slice_points[i] @ rot_mat.T + translation.squeeze()
                     )
-                if self.hough_points is not None:
-                    self.hough_points[i] = (
-                        self.hough_points[i] @ rot_mat.T + translation.squeeze()
+                if self._hough_points is not None:
+                    self._hough_points[i] = (
+                        self._hough_points[i] @ rot_mat.T + translation.squeeze()
                     )
 
-    def reconstruct(
+    def reconstruct(  # noqa: C901
         self,
         slice_heights: Union[float, Iterable] = 0.5,
         slice_thickness: float = 0.3,
@@ -577,8 +578,8 @@ class Tree:
         point_ratio: float = 0.2,
         entropy_weighting: float = 10.0,
         max_consecutive_fails: int = 3,
-        max_height: float = 10.0,
-        save_debug_results: bool = True,
+        max_height: float = 15.0,
+        save_debug_results: bool = False,
         debug_level: int = 0,
         **kwargs,
     ) -> bool:
@@ -620,9 +621,17 @@ class Tree:
         Returns:
             bool: True if reconstruction yielded at least two circles, else False
         """
+        self._reco_circles = []
+        self._slice_points = []
+        self._hough_points = []
+        self._hough_circles = []
+        self._hough_pixels = []
+        self._hough_votes = []
+
         cloud = self.points
-        axis = self.axis
-        center, rot_mat, r_from_seg = axis["center"], axis["rot_mat"], axis["radius"]
+        center = self.axis["center"]
+        rot_mat = self.axis["rot_mat"]
+        r_from_seg = self.axis["radius"]
 
         # move cloud to origin and rotate it upright
         cloud -= center
@@ -684,6 +693,14 @@ class Tree:
                 return_pixels_and_votes=True,
             )
 
+            if save_debug_results:
+                self._reco_circles.append(None)
+                self._slice_points.append(slice_points)
+                self._hough_points.append(slice_points)
+                self._hough_circles.append(hough_circle)
+                self._hough_pixels.append(pixels)
+                self._hough_votes.append(hough_votes)
+
             if hough_circle is None:
                 if debug_level > 0:
                     print("No hough circle found")
@@ -694,15 +711,17 @@ class Tree:
             if hough_votes.max() * penalty < min_hough_vote:
                 if debug_level > 0:
                     print(
-                        f"Hough vote {hough_votes.max() * penalty} not very promising"
+                        f"Hough vote {(hough_votes.max() * penalty)[0,0]:.2f} not very promising"
                     )
                 fail_counter += 1
                 continue
 
             # filter points using the hough circle
-            pc_filtered = slice_points[
-                hough_circle.get_distance(slice_points) < outlier_radius
-            ]
+            filter_mask = hough_circle.get_distance(slice_points) < outlier_radius
+            pc_filtered = slice_points[filter_mask]
+
+            if save_debug_results:
+                self._hough_points[-1] = pc_filtered
 
             # again, check if there are enough points to fit a circle. This is not a
             # redundant check as the check before will often spare expensive hough
@@ -724,7 +743,12 @@ class Tree:
                 fail_counter += 1
                 continue
 
+            if debug_level > 0:
+                print(f"Found circle at height {slice_height:.2f} m")
+
             # aggregate results
+            if save_debug_results:
+                self._reco_circles[-1] = bullock_circle
             circle_stack.append(
                 {
                     "num_points": pc_filtered.shape[0],
@@ -748,12 +772,6 @@ class Tree:
         else:
             self.circles = [t["circle"] for t in circle_stack]
             self.reconstructed = True
-            if save_debug_results:
-                self.slice_points = [t["slice_points"] for t in circle_stack]
-                self.hough_points = [t["hough_points"] for t in circle_stack]
-                self.hough_circles = [t["hough_circle"] for t in circle_stack]
-                self.hough_pixels = [t["hough_pixels"] for t in circle_stack]
-                self.hough_votes = [t["votes"] for t in circle_stack]
 
             # reapply rotation and translation
             self.apply_transform(center, rot_mat)

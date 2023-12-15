@@ -246,6 +246,11 @@ def voronoi(  # noqa: C901
             points_numpy[:, 2] > crop_lower_bound, points_numpy[:, 2] < crop_upper_bound
         )
         cluster_strip = cloud.select_by_mask(cluster_strip_mask.astype(bool))
+        if cloth is not None:
+            cloud.point.positions[:, 2] += heights.astype(np.float32)
+
+    if debug_level > 1:
+        o3d.visualization.draw_geometries([cluster_strip.to_legacy()])
 
     # 3. Perform db scan clustering after removing outliers
     with timer("dbscan clustering of crops"):
@@ -254,19 +259,26 @@ def voronoi(  # noqa: C901
         )
 
         cluster_strip = cluster_strip.select_by_index(ind)
-
         labels_pre = cluster_strip.cluster_dbscan(
             eps=0.7, min_points=20, print_progress=False
         ).numpy()
+
+    if debug_level > 1:
+        max_label = np.max(labels_pre)
+        dbscan_clusters = []
+        for i in range(max_label):
+            cluster_points = cluster_strip.select_by_mask(labels_pre == i)
+            cluster_points.paint_uniform_color(np.random.rand(3))
+            dbscan_clusters.append(cluster_points.to_legacy())
+        o3d.visualization.draw_geometries(dbscan_clusters)
 
     # 4. Clean up non-stem points using hough transform
     with timer("hough"):
         max_label = np.max(labels_pre)
         axes = []
         for i in range(max_label):
-            with timer("hough->cluster selection"):
-                cluster_points = cluster_strip.select_by_mask(labels_pre == i)
-                cluster_points = cluster_points.point.positions.numpy()
+            cluster_points = cluster_strip.select_by_mask(labels_pre == i)
+            cluster_points = cluster_points.point.positions.numpy()
             # 4.1. Remove clusters with fewer than 100 points
             with timer("hough->cluster size check"):
                 if cluster_points.shape[0] < 100:
@@ -287,8 +299,17 @@ def voronoi(  # noqa: C901
                     continue
             # 4.2. Find circles in projection of cloud onto x-y plane
             with timer("hough->hough circle"):
+                # slice crop at middle
+                middle = (crop_lower_bound + crop_upper_bound) / 2
+                slice_height = 0.2  # m
+                slice = cluster_points[
+                    np.logical_and(
+                        cluster_points[:, 2] > middle - slice_height / 2,
+                        cluster_points[:, 2] < middle + slice_height / 2,
+                    )
+                ]
                 circ, _, votes, _ = Circle.from_cloud_hough(
-                    points=cluster_points,
+                    points=slice,
                     grid_res=0.02,
                     min_radius=0.05,
                     max_radius=0.5,

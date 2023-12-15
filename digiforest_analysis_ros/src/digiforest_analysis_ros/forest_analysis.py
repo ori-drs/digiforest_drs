@@ -132,7 +132,6 @@ class ForestAnalysis:
             "~fitting/max_consecutive_fails", 3
         )
         self._fitting_max_height = rospy.get_param("~fitting/max_height", 10.0)
-        self._fitting_save_points = rospy.get_param("~fitting/save_points", True)
         self._fitting_save_debug_results = rospy.get_param(
             "~fitting/save_debug_results", False
         )

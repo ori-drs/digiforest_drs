@@ -37,7 +37,6 @@ fitting:
   point_ratio: 0.2
   entropy_weighting: 10.0
   max_consecutive_fails: 3
-  max_height: 10.0
-  save_points: True
-  save_debug_results: True
+  max_height: 15.0
+  save_debug_results: False
   n_threads: 1  
