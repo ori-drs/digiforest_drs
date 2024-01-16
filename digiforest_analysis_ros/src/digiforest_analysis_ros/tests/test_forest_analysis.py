@@ -8,7 +8,7 @@ class TestForestAnalysis(unittest.TestCase):
     def test_angle_coverage_dicontinuity_once_negative(self):
         # Jumping over discontinuity once in negative direction
         tm = TreeManager()
-        cluster = {"info": {"axis": {"center": np.array([0, 0, 0])}}}
+        cluster = {"info": {"axis": {"transform": np.eye(4)}}}
         poses = np.array([[0.5, 0.5], [0.5, -0.5], [-0.5, -0.5]])
 
         angle_from, angle_to, _, _ = tm.calculate_coverage(cluster, poses)
@@ -18,7 +18,7 @@ class TestForestAnalysis(unittest.TestCase):
     def test_angle_coverage_dicontinuity_once_negative2(self):
         # Jumping over discontinuity once in negative direction with a larger coverage
         tm = TreeManager()
-        cluster = {"info": {"axis": {"center": np.array([0, 0, 0])}}}
+        cluster = {"info": {"axis": {"transform": np.eye(4)}}}
         poses = np.array([[0.5, 0.5], [0.5, -0.5], [-0.5, -0.5], [-0.5, 0.5]])
 
         angle_from, angle_to, _, _ = tm.calculate_coverage(cluster, poses)
@@ -28,7 +28,7 @@ class TestForestAnalysis(unittest.TestCase):
     def test_angle_coverage_dicontinuity_once_positive(self):
         # Jumping over discontinuity once in positive direction
         tm = TreeManager()
-        cluster = {"info": {"axis": {"center": np.array([0, 0, 0])}}}
+        cluster = {"info": {"axis": {"transform": np.eye(4)}}}
         poses = np.array([[0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]])
 
         angle_from, angle_to, _, _ = tm.calculate_coverage(cluster, poses)
@@ -38,7 +38,7 @@ class TestForestAnalysis(unittest.TestCase):
     def test_angle_coverage_dicontinuity_twice(self):
         # Jumping over discontinuity twice
         tm = TreeManager()
-        cluster = {"info": {"axis": {"center": np.array([0, 0, 0])}}}
+        cluster = {"info": {"axis": {"transform": np.eye(4)}}}
         poses = np.array([[0.5, -0.5], [0.5, 0.5], [0.5, -0.5]])
 
         angle_from, angle_to, _, _ = tm.calculate_coverage(cluster, poses)
@@ -48,7 +48,7 @@ class TestForestAnalysis(unittest.TestCase):
     def test_angle_coverage_360(self):
         # 360 degree coverage
         tm = TreeManager()
-        cluster = {"info": {"axis": {"center": np.array([0, 0, 0])}}}
+        cluster = {"info": {"axis": {"transform": np.eye(4)}}}
         poses = np.array([[0.5, -0.5], [0.5, 0.5], [-0.5, -0.5], [0.5, -0.5]])
 
         angle_from, angle_to, _, _ = tm.calculate_coverage(cluster, poses)
@@ -58,7 +58,7 @@ class TestForestAnalysis(unittest.TestCase):
     def test_distance_coverage_same(self):
         # Distance coverage, all same distances
         tm = TreeManager()
-        cluster = {"info": {"axis": {"center": np.array([0, 0, 0])}}}
+        cluster = {"info": {"axis": {"transform": np.eye(4)}}}
         poses = np.array([[0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]])
 
         _, _, min_distance, max_distance = tm.calculate_coverage(cluster, poses)
@@ -68,7 +68,7 @@ class TestForestAnalysis(unittest.TestCase):
     def test_distance_coverage_different(self):
         # Distance coverage, different distances
         tm = TreeManager()
-        cluster = {"info": {"axis": {"center": np.array([0, 0, 0])}}}
+        cluster = {"info": {"axis": {"transform": np.eye(4)}}}
         poses = np.array([[1, -1], [0.5, 0.5], [-0.75, 0.75]])
 
         _, _, min_distance, max_distance = tm.calculate_coverage(cluster, poses)
@@ -106,7 +106,7 @@ if __name__ == "__main__":
         num_poses = 5
         poses = np.random.rand(num_poses, 2) - 0.5
 
-        cluster = {"info": {"axis": {"center": np.array([0, 0, 0])}}}
+        cluster = {"info": {"axis": {"transform": np.eye(4)}}}
         tm = TreeManager()
         min_angle, max_angle, min_distance, max_distance = tm.calculate_coverage(
             cluster, poses

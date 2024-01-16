@@ -4,6 +4,7 @@ gdown
 numpy
 scipy
 scikit-learn
+scikit-image
 Cython
 matplotlib
 pandas
@@ -14,3 +15,6 @@ ipympl
 open3d>=0.17.0
 pytest
 openpyxl
+opencv-python
+trimesh
+cloth-simulation-filter

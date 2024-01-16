@@ -1,4 +1,3 @@
-import os
 from typing import List
 from digiforest_analysis.tasks.tree_segmentation import TreeSegmentation
 from digiforest_analysis.tasks.terrain_fitting import TerrainFitting
@@ -9,7 +8,6 @@ from digiforest_analysis.utils.timing import Timer
 import numpy as np
 import open3d as o3d
 from matplotlib import pyplot as plt
-import pickle
 
 import trimesh
 
@@ -61,7 +59,8 @@ def plot_mesh(vertices, triangles, points):
 
 
 if __name__ == "__main__":
-    pcd_file = "/home/ori/logs/logs_evo_finland/exp16/combined_cloud.pcd"
+    # pcd_file = "/home/ori/logs/logs_evo_finland/exp16/combined_cloud.pcd"
+    pcd_file = "/home/ori/Downloads/cloud_1682946122_262324000.ply"
     # pcd_file = "/home/ori/logs/logs_evo_finland/exp01/2023-05-01-14-01-05-exp01/payload_clouds/cloud_1682946124_761436000.pcd"
     cloud, header = load(pcd_file, binary=True)
     if "VIEWPOINT" in header:
@@ -84,7 +83,7 @@ if __name__ == "__main__":
     tm.export("terrain.obj")
 
     # SEGMENT TREES
-    tree_seg = TreeSegmentation(debug_level=0, clustering_method="voronoi")
+    tree_seg = TreeSegmentation(debug_level=2, clustering_method="voronoi")
     clusters = tree_seg.process(
         cloud=cloud,
         cloth=terrain,
@@ -103,20 +102,20 @@ if __name__ == "__main__":
         tree.reconstruct()
         trees.append(tree)
 
-    # SAVE CLUSTER TO DISK
-    dir = "/home/ori/git/realtime-trees/single_trees/clustering_map"
-    for file in os.listdir(dir):
-        if os.path.isfile(os.path.join(dir, file)):
-            os.remove(os.path.join(dir, file))
-    for i, cluster in enumerate(clusters):
-        path = os.path.join(dir, f"tree{str(i).zfill(3)}")
-        # save pointcloud to disk as las
-        o3d.io.write_point_cloud(
-            path + ".pcd",
-            cluster["cloud"].to_legacy(),
-        )
-        with open(path + ".pkl", "wb") as file:
-            pickle.dump(cluster, file)
+    # # SAVE CLUSTER TO DISK
+    # dir = "/home/ori/git/realtime-trees/single_trees/clustering_map"
+    # for file in os.listdir(dir):
+    #     if os.path.isfile(os.path.join(dir, file)):
+    #         os.remove(os.path.join(dir, file))
+    # for i, cluster in enumerate(clusters):
+    #     path = os.path.join(dir, f"tree{str(i).zfill(3)}")
+    #     # save pointcloud to disk as las
+    #     o3d.io.write_point_cloud(
+    #         path + ".pcd",
+    #         cluster["cloud"].to_legacy(),
+    #     )
+    #     with open(path + ".pkl", "wb") as file:
+    #         pickle.dump(cluster, file)
 
     # PLOT TREE MESHES
     for tree, points in zip(

@@ -76,6 +76,12 @@ class Circle:
                 The unweighted votes can be obtained by multiplying weighted votes with
                 the factor.
         """
+        if len(points) == 0:
+            if return_pixels_and_votes:
+                return None, None, None, None
+            else:
+                return None
+
         # construct 2D grid with pixel length of grid_res
         # bounding the point cloud of the current slice
         min_x, max_x = np.min(points[:, 0]), np.max(points[:, 0])
@@ -86,6 +92,13 @@ class Circle:
         min_x, max_x = grid_center[0] - grid_width / 2, grid_center[0] + grid_width / 2
         min_y, max_y = grid_center[1] - grid_width / 2, grid_center[1] + grid_width / 2
         n_cells = int(grid_width / grid_res)
+
+        if n_cells < 5:
+            if return_pixels_and_votes:
+                return None, None, None, None
+            else:
+                return None
+
         # construct the grid
         grid_x, grid_y = np.meshgrid(
             np.linspace(min_x, max_x, n_cells + 1),
@@ -484,8 +497,9 @@ class Circle:
 
 
 class Tree:
-    def __init__(self, id: int) -> None:
+    def __init__(self, id: int, place_holder_height: float = 5) -> None:
         self.id = id
+        self.place_holder_height = place_holder_height
 
         self.reconstructed = False
         self.circles = None
@@ -500,27 +514,47 @@ class Tree:
         self.number_bends = None
         self.clear_wood = None
 
+        self.num_clusters_after_last_reco = 0
+        self.cosys_changed_after_last_reco = False
+
     def add_cluster(self, cluster: dict):
         self.clusters.append(cluster)
 
     @property
     def axis(self) -> dict:
+        """Returns Axis of the tree in the ODOM FRAME. The axis is calculated as the
+        mean of all axis parameters of the clusters.
+
+        Raises:
+            ValueError: If there are no clusters
+
+        Returns:
+            dict: mean axis
+        """
         if len(self.clusters) == 0:
             raise ValueError("No measurements available yet.")
 
-        # calculate mean of all axis parameters
-        axes = [cluster["info"]["axis"] for cluster in self.clusters]
-        mean_center = np.mean([axis["center"] for axis in axes], axis=0)
-        mean_radius = np.mean([axis["radius"] for axis in axes], axis=0)
+        cluster_trafos_odom = [
+            c["info"]["sensor_transform"] @ c["info"]["axis"]["transform"]
+            for c in self.clusters
+        ]
+
+        mean_center = np.mean([c[:3, 3] for c in cluster_trafos_odom], axis=0)
+        mean_radius = np.mean(
+            [c["info"]["axis"]["radius"] for c in self.clusters], axis=0
+        )
 
         # mean rotation is a bit trickier, scipy takes care of that
-        rotation_stack = Rotation.from_matrix([axis["rot_mat"] for axis in axes])
+        rotation_stack = Rotation.from_matrix([c[:3, :3] for c in cluster_trafos_odom])
         mean_rotation = rotation_stack.mean().as_matrix()
 
+        mean_T = np.eye(4)
+        mean_T[:3, :3] = mean_rotation
+        mean_T[:3, 3] = mean_center
+
         return {
-            "center": mean_center,
+            "transform": mean_T,
             "radius": mean_radius,
-            "rot_mat": mean_rotation,
         }
 
     @property
@@ -530,8 +564,14 @@ class Tree:
 
         # TODO ICP in x-y-plane to align all points
 
+        # transform all points to odom frame and then stack them
         return np.vstack(
-            [cluster["cloud"].point.positions.numpy() for cluster in self.clusters]
+            [
+                cluster["cloud"].point.positions.numpy()
+                @ cluster["info"]["sensor_transform"][:3, :3].T
+                + cluster["info"]["sensor_transform"][:3, 3]
+                for cluster in self.clusters
+            ]
         )
 
     def apply_transform(self, translation: np.ndarray, rotation: np.ndarray):
@@ -629,8 +669,8 @@ class Tree:
         self._hough_votes = []
 
         cloud = self.points
-        center = self.axis["center"]
-        rot_mat = self.axis["rot_mat"]
+        center = self.axis["transform"][:3, 3]
+        rot_mat = self.axis["transform"][:3, :3]
         r_from_seg = self.axis["radius"]
 
         # move cloud to origin and rotate it upright
@@ -776,6 +816,8 @@ class Tree:
             # reapply rotation and translation
             self.apply_transform(center, rot_mat)
 
+            self.num_clusters_after_last_reco = len(self.clusters)
+            self.cosys_changed_after_last_reco = False
             return True
 
     def generate_mesh(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -785,18 +827,27 @@ class Tree:
             np.ndarray: vertices of the mesh
             np.ndarray: triangle indices of the mesh
         """
-        if not self.reconstructed:
-            return None, None
+        if self.reconstructed:
+            vertices, triangles = np.empty((0, 3)), np.empty((0, 3), dtype=int)
+            for i in range(len(self.circles) - 1):
+                verts, tris = self.circles[i].genereate_cone_frustum_mesh(
+                    self.circles[i + 1]
+                )
+                triangles = np.vstack((triangles, tris + vertices.shape[0]))
+                vertices = np.vstack((vertices, verts))
 
-        vertices, triangles = np.empty((0, 3)), np.empty((0, 3), dtype=int)
-        for i in range(len(self.circles) - 1):
-            verts, tris = self.circles[i].genereate_cone_frustum_mesh(
-                self.circles[i + 1]
-            )
-            triangles = np.vstack((triangles, tris + vertices.shape[0]))
-            vertices = np.vstack((vertices, verts))
+            return vertices, triangles
+        else:
+            lower_center = self.axis["transform"][:3, 3]
+            cylinder_radius = self.axis["radius"]
+            cylinder_axis = self.axis["transform"][:3, 2]
+            cylinder_height = self.place_holder_height
+            upper_center = lower_center + cylinder_axis * cylinder_height
 
-        return vertices, triangles
+            bottom_circle = Circle(lower_center, cylinder_radius, cylinder_axis)
+            top_circle = Circle(upper_center, cylinder_radius, cylinder_axis)
+
+            return bottom_circle.genereate_cone_frustum_mesh(top_circle)
 
     def __str__(self) -> str:
-        return f"Tree with {len(self.circles)} circles"
+        return f"Tree {self.id} with {len(self.circles)} circles"

@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # author: Leonard Freissmuth
 
+from copy import deepcopy
 import os
 import pickle
 import numpy as np
@@ -9,6 +10,7 @@ import pandas as pd
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 from typing import List, Tuple
+from threading import Lock
 
 import rospy
 import tf2_ros
@@ -18,13 +20,16 @@ from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
 from nav_msgs.msg import Path
 import message_filters
+from vilens_slam_msgs.msg import PoseGraph
+from geometry_msgs.msg import PoseStamped
 
 from digiforest_analysis.tasks.tree_segmentation import TreeSegmentation
 from digiforest_analysis.tasks.ground_segmentation import GroundSegmentation
-from digiforest_analysis.tasks.tree_reconstruction import Circle, Tree
+from digiforest_analysis.tasks.tree_reconstruction import Tree
 from digiforest_analysis.utils.timing import Timer
 
 timer = Timer()
+timer2 = Timer()
 
 
 class ForestAnalysis:
@@ -32,7 +37,7 @@ class ForestAnalysis:
         self.read_params()
         self.setup_ros()
 
-        self._tree_segmenter = TreeSegmentation(
+        self._path_cloud_synchronizer = TreeSegmentation(
             clustering_method=self._clustering_method,
             debug_level=self._debug_level,
         )
@@ -46,6 +51,8 @@ class ForestAnalysis:
         )
 
         self.last_pc_header = None
+        self.tree_manager_lock = Lock()
+        self.pose_graph_stamps_lock = Lock()
 
         rospy.on_shutdown(self.shutdown_routine)
 
@@ -56,6 +63,9 @@ class ForestAnalysis:
         )
         self._payload_path_topic = rospy.get_param(
             "~payload_path_topic", "/local_mapping/path"
+        )
+        self._posegraph_update_topic = rospy.get_param(
+            "~posegraph_update_topic", "/vilens_slam/pose_graph"
         )
 
         # Publishers
@@ -73,6 +83,7 @@ class ForestAnalysis:
         self._debug_level = rospy.get_param("~debug_level", 0)
         self._base_frame_id = rospy.get_param("~base_frame_id", "base")
         self._odom_frame_id = rospy.get_param("~odom_frame_id", "odom_vilens")
+        self._map_frame_id = rospy.get_param("~map_frame_id", "map")
 
         # Tree Manager
         self._distance_threshold = rospy.get_param(
@@ -151,16 +162,23 @@ class ForestAnalysis:
         #     self._payload_cloud_topic, PointCloud2, self.payload_cloud_callback
         # )
 
+        self._sub_posegraph_update = rospy.Subscriber(
+            self._posegraph_update_topic,
+            PoseGraph,
+            self.posegraph_changed_callback,
+            queue_size=10,
+        )
+
         self._sub_payload_cloud = message_filters.Subscriber(
             self._payload_cloud_topic, PointCloud2
         )
         self._sub_payload_info = message_filters.Subscriber(
             self._payload_path_topic, Path
         )
-        self._tree_segmenter = message_filters.TimeSynchronizer(
+        self._path_cloud_synchronizer = message_filters.TimeSynchronizer(
             [self._sub_payload_cloud, self._sub_payload_info], 10
         )
-        self._tree_segmenter.registerCallback(self.payload_with_path_callback)
+        self._path_cloud_synchronizer.registerCallback(self.payload_with_path_callback)
 
         # Publishers
         self._pub_tree_meshes = rospy.Publisher(
@@ -193,13 +211,14 @@ class ForestAnalysis:
         triangles: np.ndarray,
         id: int = None,
         frame_id: str = None,
+        time_stamp=None,
     ) -> Marker:
         if vertices.shape[0] == 0:
             return None
 
         mesh_msg = Marker()
         mesh_msg.header.frame_id = frame_id if frame_id else self._base_frame_id
-        mesh_msg.header.stamp = self.last_pc_header.stamp  # rospy.Time.now()
+        mesh_msg.header.stamp = time_stamp if time_stamp else self.last_pc_header.stamp
         mesh_msg.ns = "realtime_trees/meshes"
         mesh_msg.id = id if id is not None else np.random.randint(0, 100000)
         mesh_msg.type = Marker.TRIANGLE_LIST
@@ -218,11 +237,15 @@ class ForestAnalysis:
             Point(x, y, z) for x, y, z in vertices[triangles].reshape(-1, 3).tolist()
         ]
 
-        mesh_msg.colors = [mesh_msg.color for _ in range(len(mesh_msg.points))]
+        mesh_msg.colors = [
+            mesh_msg.color,
+        ] * len(mesh_msg.points)
 
         return mesh_msg
 
-    def publish_colored_pointclouds(self, clouds: list, colors: list):
+    def publish_colored_pointclouds(
+        self, clouds: list, colors: list, frame_id=None, time_stamp=None
+    ):
         # convert colors to single float32
         for i in range(len(colors)):
             color = colors[i]
@@ -232,8 +255,8 @@ class ForestAnalysis:
 
         # Convert numpy arrays to pointcloud2 data
         header = rospy.Header()
-        header.frame_id = self.last_pc_header.frame_id
-        header.stamp = self.last_pc_header.stamp
+        header.frame_id = frame_id if frame_id else self.last_pc_header.frame_id
+        header.stamp = time_stamp if time_stamp else self.last_pc_header.stamp
 
         fields = [
             PointField("x", 0, PointField.FLOAT32, 1),
@@ -290,27 +313,42 @@ class ForestAnalysis:
                 f"Published {len(labels)} cluster labels on the topic {self._debug_cluster_labels_topic}"
             )
 
-    def payload_with_path_callback(self, point_cloud: PointCloud2, path: Path):
+    def payload_with_path_callback(self, point_cloud: PointCloud2, path_odom: Path):
         rospy.loginfo("Received payload cloud and path")
         self.last_pc_header = point_cloud.header
 
-        try:
-            odom2sensor = self._tf_buffer.lookup_transform(
-                self._base_frame_id,
-                self.last_pc_header.frame_id,
-                self.last_pc_header.stamp,
+        # find index closest to center of path, that also is in posegraph
+        center_index = len(path_odom.poses) // 2
+        with self.pose_graph_stamps_lock:
+            center_index_found = False
+            for i, step_size in enumerate(range(len(path_odom.poses))):
+                center_index += step_size * (-1) ** i
+                if path_odom.poses[center_index].header.stamp in self.pose_graph_stamps:
+                    center_index_found = True
+                    print(
+                        f"found center index at offset of {center_index - len(path_odom.poses) // 2}"
+                    )
+                    break
+            if not center_index_found:
+                rospy.logerr("Could not find center index in posegraph")
+                return
+
+        center_pose = path_odom.poses[center_index].pose
+        pc_stamp = path_odom.poses[center_index].header.stamp
+        T_sensor2odom = np.eye(4)
+        T_sensor2odom[:3, :3] = Rotation.from_quat(
+            np.array(
+                [
+                    center_pose.orientation.x,
+                    center_pose.orientation.y,
+                    center_pose.orientation.z,
+                    center_pose.orientation.w,
+                ]
             )
-            translation = odom2sensor.transform.translation
-            translation = np.array([translation.x, translation.y, translation.z])
-            rotation = odom2sensor.transform.rotation
-            rotation = np.array([rotation.x, rotation.y, rotation.z, rotation.w])
-        except (
-            tf2_ros.LookupException,
-            tf2_ros.ConnectivityException,
-            tf2_ros.ExtrapolationException,
-        ) as e:
-            rospy.logwarn("Could not get transform from odom to sensor", e)
-            return
+        ).as_matrix()
+        T_sensor2odom[:3, 3] = np.array(
+            [center_pose.position.x, center_pose.position.y, center_pose.position.z]
+        )
 
         with timer("all"):
             with timer("conversion"):
@@ -327,7 +365,7 @@ class ForestAnalysis:
             else:
                 cloth = None
             with timer("Clusterting"):
-                clusters = self._tree_segmenter.process(
+                clusters = self._path_cloud_synchronizer.process(
                     cloud=cloud,
                     cloth=cloth,
                     hough_filter_radius=self._clustering_hough_filter_radius,
@@ -339,29 +377,44 @@ class ForestAnalysis:
                 )
 
                 # send clusters to rviz
-                clouds = [c["cloud"].point.positions.numpy() for c in clusters]
-                colors = [c["info"]["color"] for c in clusters]
-                # colors = [np.random.rand(3) for c in clusters]
-                self.publish_colored_pointclouds(clouds, colors)
+                self.publish_colored_pointclouds(
+                    clouds=[c["cloud"].point.positions.numpy() for c in clusters],
+                    colors=[c["info"]["color"] for c in clusters]
+                    # colors = [np.random.rand(3) for c in clusters]
+                )
             with timer("Tree Manager"):
-                path = np.array(
+                path_odom = np.array(
                     [
                         [p.pose.position.x, p.pose.position.y, p.pose.position.z]
-                        for p in path.poses
+                        for p in path_odom.poses
                     ]
                 )
-                self._tree_manager.add_clusters_with_path(
-                    clusters, path, time_stamp=self.last_pc_header.stamp
-                )
+                # convert clusters into sensor frame and add info
+                for cluster in clusters:
+                    cluster["cloud"].transform(self.efficient_inv(T_sensor2odom))
+                    cluster["info"]["axis"]["transform"] = (
+                        self.efficient_inv(T_sensor2odom)
+                        @ cluster["info"]["axis"]["transform"]
+                    )
+                    cluster["info"]["sensor_transform"] = T_sensor2odom
+                    cluster["info"]["time_stamp"] = pc_stamp
+                with self.tree_manager_lock:
+                    self._tree_manager.add_clusters_with_path(clusters, path_odom)
 
             with timer("Publishing"):
-                self.publish_tree_manager_state(rotation, translation)
+                self.publish_tree_manager_state()
                 self._tree_manager.write_results(
                     "/home/ori/git/digiforest_drs/trees/logs"
                 )
+                # self.publish_colored_pointclouds(
+                #     clouds=[t.points for t in self._tree_manager.trees],
+                #     colors=[np.random.rand(3) for _ in self._tree_manager.trees],
+                #     frame_id=self._odom_frame_id,
+                #     time_stamp=self.last_pc_header.stamp,
+                # )
 
             if self._debug_level > 1:
-                with timer("saving to disk"):
+                with timer("dumping clusters to disk"):
                     directory = os.path.join("trees", str(self.last_pc_header.stamp))
                     if not os.path.exists(directory):
                         os.makedirs(directory)
@@ -380,12 +433,26 @@ class ForestAnalysis:
 
         rospy.loginfo("Timing results:\n" + str(timer))
 
-    def publish_tree_manager_state(
-        self, rotation: np.ndarray = None, translation: np.ndarray = None
-    ):
+    def posegraph_changed_callback(self, posegraph_msg: PoseGraph):
+        with self.pose_graph_stamps_lock:
+            self.pose_graph_stamps = [
+                pose.header.stamp for pose in posegraph_msg.path.poses
+            ]
+        with self.tree_manager_lock:
+            with timer2("Updating Poses"):
+                self._tree_manager.update_poses(
+                    posegraph_msg.path.poses,
+                    self._tf_buffer,
+                    self._map_frame_id,
+                    self._odom_frame_id,
+                )
+        print(timer2)
+
+    def publish_tree_manager_state(self):
         label_texts = []
         label_positions = []
         mesh_messages = MarkerArray()
+
         for tree, reco_flags, coverage_angle in zip(
             self._tree_manager.trees,
             self._tree_manager.tree_reco_flags,
@@ -397,30 +464,14 @@ class ForestAnalysis:
                 + f"angle_flag:    {reco_flags['angle_flag']}\n"
                 + f"distance_flag:  {reco_flags['distance_flag']}\n"
             )
-            label_positions.append(tree.axis["center"])
+            label_positions.append(tree.axis["transform"][:3, 3])
 
-            if tree.reconstructed:
-                verts, tris = tree.generate_mesh()
-                if rotation is not None and translation is not None:
-                    verts = self.apply_transform(
-                        verts, translation, rotation, inverse=False
-                    )
-                mesh_messages.markers.append(
-                    self.genereate_mesh_msg(
-                        verts, tris, id=tree.id, frame_id=self._base_frame_id
-                    )
+            verts, tris = tree.generate_mesh()
+            mesh_messages.markers.append(
+                self.genereate_mesh_msg(
+                    verts, tris, id=tree.id, frame_id=self._odom_frame_id
                 )
-            else:
-                verts, tris = self._tree_manager.generate_tree_placeholder(tree.id)
-                if rotation is not None and translation is not None:
-                    verts = self.apply_transform(
-                        verts, translation, rotation, inverse=False
-                    )
-                mesh_messages.markers.append(
-                    self.genereate_mesh_msg(
-                        verts, tris, id=tree.id, frame_id=self._base_frame_id
-                    )
-                )
+            )
 
         self._pub_tree_meshes.publish(mesh_messages)
         self.publish_cluster_labels(label_texts, label_positions)
@@ -461,6 +512,13 @@ class ForestAnalysis:
         """Executes the operations before killing the mission analysis procedures"""
         rospy.loginfo("Digiforest Analysis node stopped!")
 
+    def efficient_inv(self, T):
+        assert T.shape == (4, 4), "T must be a 4x4 matrix"
+        T_inv = np.eye(4)
+        T_inv[:3, :3] = T[:3, :3].T
+        T_inv[:3, 3] = -T[:3, :3].T @ T[:3, 3]
+        return T_inv
+
 
 class TreeManager:
     def __init__(
@@ -497,14 +555,16 @@ class TreeManager:
         self.tree_reco_flags: List[List[bool]] = []
         self.tree_coverage_angles: List[float] = []
         self.trees: List[Tree] = []
-        self._kd_tree = None
+        self._kd_tree: cKDTree = None
 
-        self._tree_id_counter = 0
+        self.num_trees = 0
         self._last_cluster_time = None
+
+        self.capture_Ts_with_stamps: List[dict] = []
 
     def _update_kd_tree(self):
         """Updates the KD tree with the current tree centers"""
-        centers = [tree.axis["center"] for tree in self.trees]
+        centers = [tree.axis["transform"][:3, 3] for tree in self.trees]
         self._kd_tree = cKDTree(centers)
 
     def _new_tree_from_cluster(self, cluster: dict):
@@ -513,12 +573,13 @@ class TreeManager:
         Args:
             cluster (dict): Dict as in the list returned by TreeSegmentation.process()
         """
-        new_tree = Tree(self._tree_id_counter)
+        place_holder_height = self.crop_upper_bound - self.crop_lower_bound
+        new_tree = Tree(self.num_trees, place_holder_height)
         new_tree.add_cluster(cluster)
         self.trees.append(new_tree)
         self.tree_reco_flags.append({"angle_flag": False, "distance_flag": False})
         self.tree_coverage_angles.append(0.0)
-        self._tree_id_counter += 1
+        self.num_trees += 1
 
     def distance_line_to_line(self, line_1: dict, line_2: dict) -> float:
         """Calculates the minum distance between two axes. If the keyword "axis_length"
@@ -528,18 +589,18 @@ class TreeManager:
         anywhere on the axis.
 
         Args:
-            line1 (dict): Dict with the keys "center", "rot_mat" and optionally
+            line1 (dict): Dict with the keys "transform" and optionally
                 "axis_length" describing the first axis.
-            line2 (dict): Dict with the keys "center", "rot_mat" and optionally
+            line2 (dict): Dict with the keys "transform" and optionally
                 "axis_length" describing the second axis.
 
         Returns:
             float: minimum distance between axes
         """
-        axis_pnt_1 = line_1["center"]
-        axis_pnt_2 = line_2["center"]
-        axis_dir_1 = line_1["rot_mat"][2, :]
-        axis_dir_2 = line_2["rot_mat"][2, :]
+        axis_pnt_1 = line_1["transform"][:3, 3]
+        axis_pnt_2 = line_2["transform"][:3, 3]
+        axis_dir_1 = line_1["transform"][:3, 2]
+        axis_dir_2 = line_2["transform"][:3, 2]
         normal = np.cross(axis_dir_1, axis_dir_2)
         normal_length = np.linalg.norm(normal)
         if np.isclose(normal_length, 0.0):
@@ -577,44 +638,56 @@ class TreeManager:
 
         return np.linalg.norm(meetin_point_1 - meeting_point_2)
 
-    def add_clusters(self, clusters: List[dict], time_stamp: rospy.Time = None):
-        """This function checks every cluster. If a tree close to the detected cluster
-        already exists, the cluster is added to the tree. If no tree is close enough, a
-        new tree is created. This function updates the KD tree.
+    def add_clusters(self, clusters_base: List[dict]):
+        """This function checks every cluster (in BASE FRAME). If a tree close to the
+        detected cluster already exists, the cluster is added to the tree. If no tree is
+        close enough, a new tree is created. This function updates the KD tree.
 
         Args:
             clusters (List[dict]): List of clusters as returned by
                 TreeSegmentation.process()
-            time_stamp (rospy.Time, optional): Time stamp of the point cloud. Defaults
-                to None.
         """
-        if time_stamp is not None:
-            for cluster in clusters:
-                cluster["time_stamp"] = time_stamp
+        # time stamp and sensor transform are same for all clusters, so just take first
+        self.capture_Ts_with_stamps.append(
+            {
+                "stamp": clusters_base[0]["info"]["time_stamp"],
+                "pose": clusters_base[0]["info"]["sensor_transform"],
+            }
+        )
+
+        self._last_cluster_time = clusters_base[0]["info"]["time_stamp"]
 
         if len(self.trees) == 0:
             # create new trees for all clusters and add them to the list
-            for cluster in clusters:
+            for cluster in clusters_base:
                 self._new_tree_from_cluster(cluster)
         else:
             # for all clusters check if tree at this coordinate already exists
             with timer("Finding Correspondences"):
                 num_existing, num_new = 0, 0
-                candiate_centers = [c["info"]["axis"]["center"] for c in clusters]
-                _, existing_indices = self._kd_tree.query(candiate_centers)
+                candidate_transforms_odom = [
+                    c["info"]["sensor_transform"] @ c["info"]["axis"]["transform"]
+                    for c in clusters_base
+                ]
+                candidate_centers = [t[:3, 3] for t in candidate_transforms_odom]
+                _, existing_indices = self._kd_tree.query(candidate_centers)
                 for i_candidate, i_existing in enumerate(existing_indices):
                     axis_length = self.crop_upper_bound - self.crop_lower_bound
-                    candidate_axis = clusters[i_candidate]["info"]["axis"]
+                    candidate_axis = deepcopy(
+                        clusters_base[i_candidate]["info"]["axis"]
+                    )
+                    # transform candidate axis to odom frame
+                    candidate_axis["transform"] = candidate_transforms_odom[i_candidate]
                     candidate_axis["axis_length"] = axis_length
                     existing_axis = self.trees[i_existing].axis
                     existing_axis["axis_length"] = axis_length
 
                     distance = self.distance_line_to_line(candidate_axis, existing_axis)
                     if distance < self.distance_threshold:
-                        self.trees[i_existing].add_cluster(clusters[i_candidate])
+                        self.trees[i_existing].add_cluster(clusters_base[i_candidate])
                         num_existing += 1
                     else:
-                        self._new_tree_from_cluster(clusters[i_candidate])
+                        self._new_tree_from_cluster(clusters_base[i_candidate])
                         num_new += 1
 
             rospy.loginfo(f"Found {num_existing} existing and {num_new} new clusters")
@@ -623,7 +696,9 @@ class TreeManager:
         self.try_reconstructions()
 
     def add_clusters_with_path(
-        self, clusters: List[dict], path: np.ndarray, time_stamp: rospy.Time = None
+        self,
+        clusters_base: List[dict],
+        path_odom: np.ndarray,
     ):
         """This function checks every cluster and performs the same as add_clusters().
         In addition, it calculates the covered angle and covered distance of the sensor
@@ -633,27 +708,119 @@ class TreeManager:
         Args:
             clusters (List[dict]): List of clusters as returned by
                 TreeSegmentation.process()
-            path (np.ndarray): Nx7 array describing consecutive 7D poses of the sensor.
+            path (np.ndarray): Nx7 array describing consecutive 7D poses of the sensor
+                in the same coordinate frame as the clusters.
                 The first three columns are the x, y, z coordinates of the position. The
                 last four columns are the x, y, z, w quaternions describing orientation.
-            time_stampe (rospy.Time, optional): Time stamp of the point cloud. Defaults
-                to None.
         """
-        if time_stamp is not None:
-            self._last_cluster_time = time_stamp
 
-        for cluster in clusters:
-            angle_from, angle_to, d_min, d_max = self.calculate_coverage(cluster, path)
-            cluster["info"]["coverage"] = {
+        for cluster_base in clusters_base:
+            angle_from, angle_to, d_min, d_max = self.calculate_coverage(
+                cluster_base, path_odom
+            )
+            cluster_base["info"]["coverage"] = {
                 "angle_from": angle_from,
                 "angle_to": angle_to,
                 "distance_min": d_min,
                 "distance_max": d_max,
             }
 
-        self.add_clusters(clusters, time_stamp)
+        self.add_clusters(clusters_base)
 
-    def calculate_coverage(self, cluster: dict, path: np.ndarray) -> Tuple[float]:
+    def update_poses(
+        self,
+        new_posegraph: List[PoseStamped],
+        tf_buffer: tf2_ros.Buffer,
+        map_frame_id: str = "map",
+        odom_frame_id: str = "odom_vilens",
+    ):
+        """detects changes in the posegraph and updates the coordinate systems of all
+        clusters in all trees.
+
+        Args:
+            posegraph_poses (List[PoseStamped]): List of of all poses of the posegraph
+                where the timestamp is used as the pose's unique ID.
+        """
+
+        def pose2T(orientation, position):
+            T = np.eye(4)
+            T[:3, :3] = Rotation.from_quat(
+                np.array(
+                    [
+                        orientation.x,
+                        orientation.y,
+                        orientation.z,
+                        orientation.w,
+                    ]
+                )
+            ).as_matrix()
+            T[:3, 3] = np.array([position.x, position.y, position.z])
+            return T
+
+        def pose_almost_equal(poseA, poseB):
+            posA = np.array([poseA.position.x, poseA.position.y, poseA.position.z])
+            posB = np.array([poseB.position.x, poseB.position.y, poseB.position.z])
+            rotA = np.array(
+                [
+                    poseA.orientation.x,
+                    poseA.orientation.y,
+                    poseA.orientation.z,
+                    poseA.orientation.w,
+                ]
+            )
+            rotB = np.array(
+                [
+                    poseB.orientation.x,
+                    poseB.orientation.y,
+                    poseB.orientation.z,
+                    poseB.orientation.w,
+                ]
+            )
+            return np.isclose(posA, posB).all() and np.isclose(rotA, rotB).all()
+
+        # find all poses that have changed since capture
+        new_stamps = [pose.header.stamp for pose in new_posegraph]
+        changed_poses = []
+        for i, T_with_stamp in enumerate(self.capture_Ts_with_stamps):
+            try:
+                i_new = new_stamps.index(T_with_stamp["stamp"])
+                new_stamped_pose_map = new_posegraph[i_new]
+                map2odom = tf_buffer.lookup_transform(
+                    target_frame=odom_frame_id,
+                    source_frame=map_frame_id,
+                    time=new_posegraph[-1].header.stamp,
+                    timeout=rospy.Duration(0.1),
+                )
+                T_map2odom = pose2T(
+                    map2odom.transform.rotation,
+                    map2odom.transform.translation,
+                )
+                new_T_odom = T_map2odom @ pose2T(
+                    new_stamped_pose_map.pose.orientation,
+                    new_stamped_pose_map.pose.position,
+                )
+                if not np.allclose(new_T_odom, T_with_stamp["pose"]):
+                    changed_poses.append(
+                        {
+                            "stamp": T_with_stamp["stamp"],
+                            "pose": new_T_odom,
+                        }
+                    )
+                    self.capture_Ts_with_stamps[i]["pose"] = new_T_odom
+            except ValueError:
+                print("Timestamp not found")
+                print(self.capture_Ts_with_stamps)
+                continue
+
+        for changed_pose in changed_poses:
+            for tree in self.trees:
+                for cluster in tree.clusters:
+                    if changed_pose["stamp"] == cluster["info"]["time_stamp"]:
+                        cluster["info"]["sensor_transform"] = changed_pose["pose"]
+
+    def calculate_coverage(
+        self, cluster_base: dict, path_odom: np.ndarray
+    ) -> Tuple[float]:
         """Calculates the covered angle of the sensor to the tree axis for a given
         cluster. The covered angle is given by two values defining the global extent
         of the arc around the z-axis in the x-y-plane bounding all rays from the
@@ -662,8 +829,10 @@ class TreeManager:
         The angles are given wrt. to the global x-axis and are in [0, 2*pi].
 
         Args:
-            cluster (dict): Dict as in the list returned by TreeSegmentation.process()
-            path (np.ndarray): Nx7 array describing consecutive 7D poses of the sensor.
+            cluster_base (dict): Dict as in the list returned by TreeSegmentation.process().
+                Mind that clusters must be in SENSOR FRAME.
+            path_odom (np.ndarray): Nx7 array describing consecutive 7D poses of the
+                sensor in the ODOM FRAME.
                 The first three columns are the x, y, z coordinates of the position. The
                 last four columns are the x, y, z, w quaternions describing orientation.
 
@@ -676,9 +845,13 @@ class TreeManager:
         min_distance = np.inf
         max_distance = -np.inf
         angles = []
-        for pose in path:
+        for pose in path_odom:
             # calculate connecting vector between sensor pose and tree axis center
-            ray_vector = pose[:2] - cluster["info"]["axis"]["center"][:2]
+            cluster_transform_odom = (
+                cluster_base["info"]["sensor_transform"]
+                @ cluster_base["info"]["axis"]["transform"]
+            )
+            ray_vector = pose[:2] - cluster_transform_odom[:2, 3]
             ray_length = np.linalg.norm(ray_vector)
 
             # calculate angle of ray vector wrt. global x-axis
@@ -718,78 +891,19 @@ class TreeManager:
         for angle_from, angle_to in intervals:
             angle_from = int(np.around(np.rad2deg(angle_from)))
             angle_to = int(np.around(np.rad2deg(angle_to)))
-            angle_accumulator[angle_from:angle_to] = True
+            if angle_to < angle_from:
+                angle_accumulator[angle_from:] = True
+                angle_accumulator[:angle_to] = True
+            else:
+                angle_accumulator[angle_from:angle_to] = True
         return np.deg2rad(angle_accumulator.sum())
-
-    def check_angle_coverage(self, intervals: List[Tuple[float]], tree_id: int) -> bool:
-        """Checks if the union of angle intervals given by the list of tuples is greater
-        than the reco_min_angle_coverage parameter.
-
-        Args:
-            intervals (List[Tuple[float]]): List of tuples of angles. Each tuple
-                contains  two angles defining the start and end angle of an arc wrt.
-                the global x-axis.
-            tree_id (int): ID of the tree the angle intervals belong to.
-
-        Returns:
-            bool: True if the union of intervals is large enough, False otherwise.
-        """
-        coverage_angle = self.compute_angle_coverage(intervals)
-        self.tree_coverage_angles[tree_id] = coverage_angle
-
-        return coverage_angle >= self.reco_min_angle_coverage
-
-    def check_distance_coverage(self, distances: List[Tuple[float]]) -> bool:
-        """Checks if the distances given by the list of tuples are covered by the
-        distance_threshold parameter.
-
-        Args:
-            distances (List[Tuple[float]]): List of tuples of distances. Each tuple
-                contains two distances defining the min and max distance of a sensor
-                pose to the tree axis.
-
-        Returns:
-            bool: True if all distances are covered, False otherwise.
-        """
-        distances = np.array(distances)
-        d_min = np.min(distances[:, 0])
-        return d_min <= self.reco_min_distance
-
-    def generate_tree_placeholder(
-        self, tree_id: int, cylinder_height: float = 5.0
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Generates a mesh for a tree placeholder represented as a list of vertices and
-        a list of triangle indices.
-        The placeholder is a cylinder represents the tree axis as a cylinder with the
-        radius that has been determined with hough fitting during clustering and
-        alignment accordint to the axis determined during fitting.
-
-        Args:
-            tree_id (int): unique id of the tree
-            cylinder_height (float, optional): height of the cylinder. Defaults to 5.0.
-
-        Returns:
-            np.ndarray: Nx3 array of vertices
-            np.ndarray: Mx3 array of triangle indices
-        """
-        axis = self.trees[tree_id].axis
-        lower_center = axis["center"]
-        cylinder_radius = axis["radius"]
-        cylinder_axis = axis["rot_mat"][2, :]
-        cylinder_height = self.crop_upper_bound - self.crop_lower_bound
-        upper_center = lower_center + cylinder_axis * cylinder_height
-
-        bottom_circle = Circle(lower_center, cylinder_radius, cylinder_axis)
-        top_circle = Circle(upper_center, cylinder_radius, cylinder_axis)
-
-        return bottom_circle.genereate_cone_frustum_mesh(top_circle)
 
     def try_reconstructions(self) -> bool:
         """Checks all trees in the data base if they satisfy the conditions to be
         reconstructed. If so, they are reconstrcuted.
 
         Returns:
-            bool: True if at least one tree was reconstructed, False otherwise.
+            bool: True if at least one tree was newly reconstructed, False otherwise.
         """
         reco_happened = False
         for i, tree in enumerate(self.trees):
@@ -803,13 +917,24 @@ class TreeManager:
                 for cluster in tree.clusters
             ]
 
-            if not self.check_angle_coverage([c[:2] for c in coverages], tree.id):
-                continue
-            self.tree_reco_flags[i]["angle_flag"] = True
+            coverage_angle = self.compute_angle_coverage([c[:2] for c in coverages])
+            self.tree_coverage_angles[tree.id] = coverage_angle
+            angle_flag = coverage_angle > self.reco_min_angle_coverage
+            self.tree_reco_flags[i]["angle_flag"] = angle_flag
 
-            if not self.check_distance_coverage([c[2:] for c in coverages]):
+            distances = np.array([c[2:] for c in coverages])
+            d_min = np.min(distances[:, 0])
+            distance_flag = d_min < self.reco_min_distance
+            self.tree_reco_flags[i]["distance_flag"] = distance_flag
+
+            if (
+                len(tree.clusters) == tree.num_clusters_after_last_reco
+                and not tree.cosys_changed_after_last_reco
+            ):
                 continue
-            self.tree_reco_flags[i]["distance_flag"] = True
+
+            if not angle_flag or not distance_flag:
+                continue
 
             rospy.loginfo(f"Reconstructing tree {tree.id}")
             reco_happened |= tree.reconstruct()
@@ -852,8 +977,8 @@ class TreeManager:
             data.append(
                 [
                     tree.id,
-                    tree.axis["center"][0],
-                    tree.axis["center"][1],
+                    tree.axis["transform"][0, 3],
+                    tree.axis["transform"][1, 3],
                     len(tree.clusters),
                     np.rad2deg(self.tree_coverage_angles[tree.id]),
                     tree.DBH,

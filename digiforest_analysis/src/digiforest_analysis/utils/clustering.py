@@ -315,6 +315,11 @@ def voronoi(  # noqa: C901
                     max_radius=0.5,
                     return_pixels_and_votes=True,
                 )
+                if votes is None:
+                    if debug_level > 0:
+                        print("No votes")
+                    continue
+
                 if votes.max() < 0.1:
                     if debug_level > 0:
                         print("max_vote < 0.1")
@@ -329,6 +334,10 @@ def voronoi(  # noqa: C901
             with timer("hough->filter"):
                 dist = circ.get_distance(cluster_points)
                 cluster_points = cluster_points[dist < hough_filter_radius]
+                if cluster_points.shape[0] < 10:
+                    if debug_level > 0:
+                        print("Too few points after filtering")
+                    continue
 
             # 5. Fit tree axes to clusters using PCA
             with timer("hough->PCA fitting"):
@@ -337,6 +346,7 @@ def voronoi(  # noqa: C901
                 rot_mat = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]]) @ pca.components_
                 if rot_mat[2, 2] < 0:
                     rot_mat[:, 1:] *= -1  # make sure the z component is positive
+                rot_mat = rot_mat.T
 
             # convert cluster_points into open3d point cloud and give a random color
             with timer("hough->points to open3d"):
@@ -344,10 +354,12 @@ def voronoi(  # noqa: C901
                     o3d.utility.Vector3dVector(cluster_points)
                 )
                 cluster_points.paint_uniform_color(np.random.rand(3))
+                T = np.eye(4)
+                T[:3, :3] = rot_mat
+                T[:3, 3] = np.array([circ.x, circ.y, crop_lower_bound])
                 axis_dict = {
-                    "center": np.array([circ.x, circ.y, crop_lower_bound]),
+                    "transform": T,
                     "radius": circ.radius,
-                    "rot_mat": rot_mat,
                 }
                 if debug_level > 1:
                     axis_dict["cloud"] = o3d.t.geometry.PointCloud.from_legacy(
@@ -365,12 +377,12 @@ def voronoi(  # noqa: C901
             # shift up or down depending on third component of pca. Thus the
             # cylinder allways covers the pc
             cylinder.vertices = o3d.utility.Vector3dVector(
-                np.array(cylinder.vertices)
-                + np.array([0, 0, cylinder_height / 2]) * np.sign(axis["rot_mat"][2, 2])
+                np.array(cylinder.vertices) + np.array([0, 0, cylinder_height / 2])
             )
             cylinder.paint_uniform_color([0.8, 0.8, 1])
             cylinder.vertices = o3d.utility.Vector3dVector(
-                (axis["rot_mat"].T @ np.array(cylinder.vertices).T).T + axis["center"]
+                (np.array(cylinder.vertices) @ axis["transform"][:3, :3].T)
+                + axis["transform"][:3, 3]
             )
             cylinders.append(cylinder)
         o3d.visualization.draw_geometries(
@@ -380,7 +392,9 @@ def voronoi(  # noqa: C901
     # 6. Perform voronoi tesselation of point cloud without floor
     # calculate distance to each axis
     with timer("voronoi"):
-        axes_np = np.array([np.hstack((a["rot_mat"][2, :], a["center"])) for a in axes])
+        axes_np = np.array(
+            [np.hstack((a["transform"][:3, 2], a["transform"][:3, 3])) for a in axes]
+        )
         if point_fraction < 1.0:
             precise_mask = np.random.rand(points_numpy.shape[0]) < point_fraction
             precise_query_points = points_numpy[precise_mask]

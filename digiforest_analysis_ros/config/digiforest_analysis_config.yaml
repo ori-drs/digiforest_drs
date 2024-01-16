@@ -1,9 +1,11 @@
 debug_level: 0
 
-base_frame_id: "base"
+base_frame_id: "base_vilens_optimized"
 odom_frame_id: "odom_vilens"
+map_frame_id: "map"
 payload_cloud_topic: "/local_mapping/payload_in_local"
 payload_path_topic: "/local_mapping/path"
+posegraph_update_topic: "/vilens_slam/pose_graph"
 tree_meshes_topic: "/digiforest_forest_analysis/tree_meshes"
 
 tree_manager:
