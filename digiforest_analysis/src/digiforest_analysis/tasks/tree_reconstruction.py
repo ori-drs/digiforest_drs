@@ -159,9 +159,9 @@ class Circle:
             #       radius has less than 50% of the votes.
 
             vote_fraction = np.count_nonzero(hough_res, axis=(1, 2)) / n_cells**2
-            radius_mask = try_radii > 0.5 * n_cells
-            votes_mask = vote_fraction < 0.50 * np.max(vote_fraction)
-            mask = ~np.logical_and(radius_mask, votes_mask)
+            radius_mask = try_radii < 0.5 * n_cells
+            votes_mask = vote_fraction > 0.50 * np.max(vote_fraction)
+            mask = np.logical_and(radius_mask, votes_mask)
             if not np.any(mask):
                 # return if there's no radii left
                 if return_pixels_and_votes:
@@ -172,6 +172,11 @@ class Circle:
             try_radii = try_radii[mask]
 
             hough_flattened = hough_res.reshape(hough_res.shape[0], -1)
+            # print("######")
+            # print(n_cells)
+            # print(vote_fraction)
+            # print(votes_mask)
+            # print(hough_flattened.shape)
             top_10 = np.partition(hough_flattened, -10, axis=1)[:, -10:]
             # discard radii where there's fewer than 10 candidates
             # i.e. where top 10 contains 0
@@ -184,10 +189,17 @@ class Circle:
             top_10_entropy[np.isnan(top_10_entropy)] = -1
             top_10_entropy[top_10_entropy < 0] = top_10_entropy.max()
             top_10_entropy[discard_mask] = top_10_entropy.max()
-            # normalize entropy to be between 0.1 and 1 given max reward of 10x
-            penalty = 1 / entropy_weighting + (1 - entropy_weighting) * (
-                top_10_entropy - np.min(top_10_entropy)
-            ) / (np.max(top_10_entropy) - np.min(top_10_entropy))
+            # normalize entropy to be between 1/entropy_weighting and 1 given max reward
+            # of entropy_weighting
+            entropy_range = np.max(top_10_entropy) - np.min(top_10_entropy)
+            if entropy_range < 1e-12:
+                penalty = np.ones_like(top_10_entropy)
+            penalty = (
+                1 / entropy_weighting
+                + (1 - 1 / entropy_weighting)
+                * (top_10_entropy - np.min(top_10_entropy))
+                / entropy_range
+            )
             hough_res /= penalty[:, None, None]
 
         # constrain circles to be roughly above previous one

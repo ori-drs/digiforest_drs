@@ -229,14 +229,14 @@ def voronoi(  # noqa: C901
     # 1. Normalize heights
     with timer("normalizing heights"):
         if cloth is not None:
-            interpolator = RegularGridInterpolator(
+            height_interpolator = RegularGridInterpolator(
                 points=(cloth[:, 0, 1], cloth[0, :, 0]),
                 values=cloth[:, :, 2],
                 method="linear",
                 bounds_error=False,
                 fill_value=0.0,
             )
-            heights = interpolator(cloud.point.positions.numpy()[:, :2])
+            heights = height_interpolator(cloud.point.positions.numpy()[:, :2])
             cloud.point.positions[:, 2] -= heights.astype(np.float32)
 
     # 2. Crop point cloud between cluster_strip_min and cluster_strip_max
@@ -458,6 +458,12 @@ def voronoi(  # noqa: C901
         for i, label in enumerate(unique_labels[1:]):
             labels[labels == label] = i
             filtered_axes.append(axes[label])
+        # denormalize heights in clusters
+        if cloth is not None:
+            tree_centers = np.array([a["transform"][:2, 3] for a in filtered_axes])
+            terrain_heights = height_interpolator(tree_centers)
+            for i, axis in enumerate(filtered_axes):
+                axis["transform"][2, 3] += terrain_heights[i]
     if debug_level > 0:
         print(timer)
 
