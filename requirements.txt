@@ -17,4 +17,5 @@ pytest
 openpyxl
 opencv-python
 trimesh
+pyembree
 cloth-simulation-filter

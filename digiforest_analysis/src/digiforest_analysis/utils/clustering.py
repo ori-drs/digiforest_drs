@@ -215,7 +215,7 @@ def voronoi(  # noqa: C901
     crop_lower_bound: float = 5.0,
     crop_upper_bound: float = 8.0,
     max_cluster_radius: float = np.inf,
-    n_threads: int = 8,
+    n_threads: int = 1,
     point_fraction: float = 0.1,
     debug_level: int = 0,
     cluster_2d: bool = False,

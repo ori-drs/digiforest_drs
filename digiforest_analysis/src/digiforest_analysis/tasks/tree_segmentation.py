@@ -8,6 +8,7 @@ import numpy as np
 
 class TreeSegmentation(BaseTask):
     def __init__(self, **kwargs):
+        print("TREE SEGMENTATION")
         super().__init__(**kwargs)
 
         self._rejected_clusters = []
@@ -29,6 +30,7 @@ class TreeSegmentation(BaseTask):
         # Colormap parameters
         self._cmap = plotting.color_palette
         self._ncolors = plotting.n_colors
+        print("finished init")
 
     def _process(self, **kwargs):
         """ "
@@ -37,6 +39,7 @@ class TreeSegmentation(BaseTask):
         Returns:
             _type_: _description_
         """
+        print("PROCESSING")
         cloud = kwargs.get("cloud")
         assert len(cloud.point.normals) > 0
         del kwargs["cloud"]  # so **kwargs doesn't lead to duplicate cloud arg
@@ -91,6 +94,7 @@ class TreeSegmentation(BaseTask):
         return new_cloud
 
     def clustering(self, cloud, cloth=None, **kwargs):
+        print("CLUSTERING")
         # Run clustering
         return_value = clustering.cluster(
             cloud,

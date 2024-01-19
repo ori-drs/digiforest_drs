@@ -1,5 +1,4 @@
 import numpy as np
-import CSF
 
 from digiforest_analysis.tasks import BaseTask
 
@@ -8,6 +7,8 @@ class TerrainFitting(BaseTask):
     def __init__(
         self, sloop_smooth: bool = False, cloth_cell_size: float = 0.1, **kwargs
     ):
+        import CSF
+
         super().__init__(**kwargs)
         self.csf = CSF.CSF()
         self.csf.params.bSloopSmooth = sloop_smooth

@@ -2,15 +2,16 @@
 # author: Leonard Freissmuth
 
 from copy import deepcopy
+from functools import partial
 import os
 import pickle
 import numpy as np
-import open3d as o3d
 import pandas as pd
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 from typing import List, Tuple
 from threading import Lock
+from multiprocessing.pool import ThreadPool
 
 import rospy
 import tf2_ros
@@ -20,14 +21,13 @@ from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
 from nav_msgs.msg import Path
 import message_filters
-from vilens_slam_msgs.msg import PoseGraph
 from geometry_msgs.msg import PoseStamped
+import trimesh
 
-from digiforest_analysis.tasks.tree_segmentation import TreeSegmentation
 from digiforest_analysis.tasks.terrain_fitting import TerrainFitting
 from digiforest_analysis.tasks.tree_reconstruction import Tree
 from digiforest_analysis.utils.timing import Timer
-from digiforest_analysis_ros.utils import pose2T, transform_clusters, efficient_inv
+from digiforest_analysis_ros.utils import pose2T, clustering_worker_fun
 
 timer = Timer()
 
@@ -37,15 +37,7 @@ class ForestAnalysis:
         self.read_params()
         self.setup_ros()
 
-        self._terrain_fitter = TerrainFitting(
-            sloop_smooth=self._terrain_smoothing,
-            cloth_cell_size=self._terrain_cloth_cell_size,
-        )
-
-        self._tree_segmenter = TreeSegmentation(
-            clustering_method=self._clustering_method,
-            debug_level=self._debug_level,
-        )
+        self._clustering_pool = ThreadPool(processes=self._clustering_n_threads)
 
         self._tree_manager = TreeManager(
             self._distance_threshold,
@@ -56,8 +48,8 @@ class ForestAnalysis:
         )
 
         self.last_pc_header = None
+        self.pc_counter = 0
         self.tree_manager_lock = Lock()
-        self.pose_graph_stamps_lock = Lock()
 
         rospy.on_shutdown(self.shutdown_routine)
 
@@ -65,7 +57,7 @@ class ForestAnalysis:
         self._debug_level = rospy.get_param("~debug_level", 0)
 
         # IDs
-        self._base_frame_id = rospy.get_param("~id/base_frame", "base")
+        self._base_frame_id = rospy.get_param("~id/base_frame", "base_vilens_optimized")
         self._odom_frame_id = rospy.get_param("~id/odom_frame", "odom_vilens")
         self._map_frame_id = rospy.get_param("~id/map_frame_", "map")
 
@@ -94,7 +86,7 @@ class ForestAnalysis:
 
         # Tree Manager
         self._distance_threshold = rospy.get_param(
-            "~tree_manager/distance_threshold", 0.1
+            "~tree_manager/distance_threshold", 0.5
         )
         self._reco_min_angle_coverage = np.deg2rad(
             rospy.get_param("~tree_manager/reco_min_angle_coverage", 180)
@@ -104,27 +96,25 @@ class ForestAnalysis:
         )
 
         # Terrain Fitting
-        self._terrain_enabled = rospy.get_param("~terrain/enabled", False)
-        self._terrain_cloth_cell_size = rospy.get_param("~terrain/cell_size", 2)
+        self._terrain_enabled = rospy.get_param("~terrain/enabled", True)
         self._terrain_smoothing = rospy.get_param("~terrain_fitting/smoothing", False)
+        self._terrain_cloth_cell_size = rospy.get_param("~terrain/cell_size", 1)
 
         # Clustering
-        self._clustering_crop_radius = rospy.get_param("~clustering/crop_radius", 15.0)
-        self._clustering_method = rospy.get_param("~clustering/method", "voronoi")
+        self._clustering_crop_radius = rospy.get_param("~clustering/crop_radius", 40.0)
         self._clustering_hough_filter_radius = rospy.get_param(
             "~clustering/hough_filter_radius", 0.1
         )
         self._clustering_crop_lower_bound = rospy.get_param(
-            "~clustering/crop_lower_bound", 5.0
+            "~clustering/crop_lower_bound", 4.0
         )
         self._clustering_crop_upper_bound = rospy.get_param(
             "~clustering/crop_upper_bound", 8.0
         )
         self._clustering_max_cluster_radius = rospy.get_param(
-            "~clustering/max_cluster_radius", 3.0
+            "~clustering/max_cluster_radius", 5.0
         )
-        self._clustering_n_threads = rospy.get_param("~clustering/n_threads", 8)
-        self._clustering_cluster_2d = rospy.get_param("~clustering/cluster_2d", False)
+        self._clustering_n_threads = rospy.get_param("~clustering/n_threads", 4)
         self._clustering_distance_calc_point_fraction = rospy.get_param(
             "~clustering/distance_calc_point_fraction", 0.1
         )
@@ -151,7 +141,7 @@ class ForestAnalysis:
         self._fitting_max_consecutive_fails = rospy.get_param(
             "~fitting/max_consecutive_fails", 3
         )
-        self._fitting_max_height = rospy.get_param("~fitting/max_height", 10.0)
+        self._fitting_max_height = rospy.get_param("~fitting/max_height", 15.0)
         self._fitting_save_debug_results = rospy.get_param(
             "~fitting/save_debug_results", False
         )
@@ -162,6 +152,9 @@ class ForestAnalysis:
         self._tf_listener = None
 
     def setup_ros(self):
+        # imported here to avoid conflicts with the multiprocessing....
+        from vilens_slam_msgs.msg import PoseGraph
+
         # listeners for transforms
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer)
@@ -214,46 +207,6 @@ class ForestAnalysis:
             latch=True,
         )
 
-    def pc2_to_o3d(self, cloud: PointCloud2):
-        cloud_numpy = np.frombuffer(cloud.data, dtype=np.float32).reshape(-1, 12)
-        # clear points with at least one nan
-        cloud_numpy = cloud_numpy[~np.isnan(cloud_numpy).any(axis=1)]
-
-        cloud = o3d.geometry.PointCloud()
-        cloud.points = o3d.utility.Vector3dVector(cloud_numpy[:, :3])
-        cloud.normals = o3d.utility.Vector3dVector(cloud_numpy[:, 4:7])
-        cloud = o3d.t.geometry.PointCloud.from_legacy(cloud)
-
-        return cloud
-
-    def crop_pc(
-        self,
-        cloud: o3d.t.geometry.PointCloud,
-        sensor_pose: np.ndarray,
-        radius: float,
-    ):
-        """Crops a point cloud using a max distance from the sensor. The sensor pose
-
-        Args:
-            cloud (o3d.t.geometry.PointCloud): Point cloud to be cropped
-            sensor_pose (np.ndarray): 4x4 transformation matrix from sensor to odom
-            radius (float): maximum distance from sensor in m
-        """
-        # Transform the point cloud to sensor frame
-        cloud = cloud.transform(efficient_inv(sensor_pose))
-        num_points_before = len(cloud.point.positions)
-        # Calculate the distance from the sensor
-        distances = np.linalg.norm(cloud.point.positions.numpy()[:, :2], axis=1)
-        mask = distances <= radius
-        cloud = cloud.select_by_mask(mask)
-        cloud = cloud.transform(sensor_pose)
-        if self._debug_level > 1:
-            print(
-                f"cropped cloud to {100.*mask.sum()/num_points_before:.3f} % -> {len(cloud.point.positions)} points"
-            )
-
-        return cloud
-
     def genereate_mesh_msg(
         self,
         vertices: np.ndarray,
@@ -262,6 +215,7 @@ class ForestAnalysis:
         frame_id: str = None,
         time_stamp=None,
         color=[140 / 255.0, 102 / 255.0, 87 / 255.0],
+        alpha=1.0,
     ) -> Marker:
         if vertices.shape[0] == 0:
             return None
@@ -278,7 +232,7 @@ class ForestAnalysis:
         mesh_msg.scale.x = 1.0
         mesh_msg.scale.y = 1.0
         mesh_msg.scale.z = 1.0
-        mesh_msg.color.a = 0.9
+        mesh_msg.color.a = alpha
         mesh_msg.color.r = color[0]
         mesh_msg.color.g = color[1]
         mesh_msg.color.b = color[2]
@@ -287,9 +241,9 @@ class ForestAnalysis:
             Point(x, y, z) for x, y, z in vertices[triangles].reshape(-1, 3).tolist()
         ]
 
-        mesh_msg.colors = [
-            mesh_msg.color,
-        ] * len(mesh_msg.points)
+        # mesh_msg.colors = [
+        #     mesh_msg.color,
+        # ] * len(mesh_msg.points)
 
         return mesh_msg
 
@@ -370,93 +324,54 @@ class ForestAnalysis:
                 f"Published {len(labels)} cluster labels on the topic {self._debug_cluster_labels_topic}"
             )
 
-    def payload_with_path_callback(self, point_cloud: PointCloud2, path_odom: Path):
-        rospy.loginfo("Received payload cloud and path")
-        self.last_pc_header = point_cloud.header
-
-        # find index closest to center of path that also is in posegraph
-        center_index = len(path_odom.poses) // 2
-        with self.pose_graph_stamps_lock:
-            center_index_found = False
-            for i, step_size in enumerate(range(len(path_odom.poses))):
-                center_index += step_size * (-1) ** i
-                if path_odom.poses[center_index].header.stamp in self.pose_graph_stamps:
-                    center_index_found = True
-                    break
-            if not center_index_found:
-                rospy.logerr("Could not find any cloud's stamp in posegraph")
-                return
-
-        center_pose = path_odom.poses[center_index].pose
-        center_stamp = path_odom.poses[center_index].header.stamp
-        T_sensor2odom = pose2T(center_pose.orientation, center_pose.position)
-
-        with timer("all"):
-            with timer("conversion"):
-                cloud = self.pc2_to_o3d(point_cloud)
-                cloud = self.crop_pc(
-                    cloud,
-                    sensor_pose=T_sensor2odom,
-                    radius=self._clustering_crop_radius,
-                )
-
-            if self._terrain_enabled:
-                with timer("Terrain"):
-                    terrain = self._terrain_fitter.process(cloud=cloud)
-                    verts, tris = self._terrain_fitter.meshgrid_to_mesh(terrain)
-                    terrain_marker = self.genereate_mesh_msg(
-                        verts,
-                        tris,
-                        id=0,
-                        color=[0.5, 0.5, 0.5],
-                        frame_id=self._odom_frame_id,
-                        time_stamp=rospy.Time.now(),
-                    )
-                    self._pub_terrain_model.publish(terrain_marker)
-            else:
-                terrain = None
-            with timer("Clusterting"):
-                clusters = self._tree_segmenter.process(
-                    cloud=cloud,
-                    cloth=terrain,
-                    hough_filter_radius=self._clustering_hough_filter_radius,
-                    crop_lower_bound=self._clustering_crop_lower_bound,
-                    crop_upper_bound=self._clustering_crop_upper_bound,
-                    max_cluster_radius=self._clustering_max_cluster_radius,
-                    n_threads=self._clustering_n_threads,
-                    point_fraction=self._clustering_distance_calc_point_fraction,
-                )
-
-                # send clusters to rviz
+    def _clustering_worker_finished_callback(
+        self, result, path_odom: np.ndarray, pc_counter: int
+    ):
+        clusters, terrain = result
+        with timer("cwc"):
+            with timer("cwc/publishing_clustering"):
                 self.publish_pointclouds(
                     self._pub_debug_clusters,
-                    clouds=[c["cloud"].point.positions.numpy() for c in clusters],
-                    colors=[c["info"]["color"] for c in clusters]
-                    # colors = [np.random.rand(3) for c in clusters]
+                    clouds=[
+                        c["cloud"]
+                        .transform(c["info"]["sensor_transform"])
+                        .point.positions.numpy()
+                        for c in clusters
+                    ],
+                    colors=[c["info"]["color"] for c in clusters],
+                    frame_id=self._odom_frame_id,
                 )
-            with timer("Tree Manager"):
+            with timer("cwc/tree_manager"):
                 path_odom = np.array(
                     [
                         [p.pose.position.x, p.pose.position.y, p.pose.position.z]
                         for p in path_odom.poses
                     ]
                 )
-                # convert clusters into stamped sensor frame
-                clusters = transform_clusters(
-                    clusters, T_new2old=T_sensor2odom, time_stamp=center_stamp
-                )
-                print(clusters[0]["info"]["time_stamp"])
                 with self.tree_manager_lock:
                     self._tree_manager.add_clusters_with_path(clusters, path_odom)
-
-            with timer("Publishing"):
+                    sensor_transform = clusters[0]["info"]["sensor_transform"]
+                    verts, tris = TerrainFitting().meshgrid_to_mesh(terrain)
+                    verts = self.apply_transform(
+                        verts,
+                        sensor_transform[:3, 3],
+                        sensor_transform[:3, :3],
+                        inverse=True,
+                    )
+                    self._tree_manager.add_terrain(
+                        verts,
+                        tris,
+                        clusters[0]["info"]["time_stamp"],
+                        sensor_transform,
+                        self._terrain_cloth_cell_size,
+                    )
+            with timer("cwc/publishing_tree_manager"):
                 self.publish_tree_manager_state()
                 self._tree_manager.write_results(
                     "/home/ori/git/digiforest_drs/trees/logs"
                 )
-
             if self._debug_level > 1:
-                with timer("dumping clusters to disk"):
+                with timer("cwc/dumping_clusters"):
                     directory = os.path.join("trees", str(self.last_pc_header.stamp))
                     if not os.path.exists(directory):
                         os.makedirs(directory)
@@ -472,15 +387,42 @@ class ForestAnalysis:
                             "wb",
                         ) as file:
                             pickle.dump(cluster, file)
+        rospy.loginfo(f"Finished processing payload cloud {pc_counter}:\n{timer}")
 
-        rospy.loginfo("Timing results:\n" + str(timer))
-        rospy.loginfo("Finished payload cloud and path")
+    def payload_with_path_callback(self, cloud_msg: PointCloud2, path_odom: Path):
+        self.pc_counter += 1
+        rospy.loginfo(f"Received payload cloud {self.pc_counter} and path")
+        self.last_pc_header = cloud_msg.header
 
-    def posegraph_changed_callback(self, posegraph_msg: PoseGraph):
-        with self.pose_graph_stamps_lock:
-            self.pose_graph_stamps = [
-                pose.header.stamp for pose in posegraph_msg.path.poses
-            ]
+        self._clustering_pool.apply_async(
+            clustering_worker_fun,
+            kwds={
+                "cloud_msg": cloud_msg,
+                "path_odom": path_odom,
+                "pose_graph_stamps": self.pose_graph_stamps,
+                "terrain_enabled": self._terrain_enabled,
+                "terrain_smoothing": self._terrain_smoothing,
+                "terrain_cloth_cell_size": self._terrain_cloth_cell_size,
+                "clustering_crop_radius": self._clustering_crop_radius,
+                "hough_filter_radius": self._clustering_hough_filter_radius,
+                "crop_lower_bound": self._clustering_crop_lower_bound,
+                "crop_upper_bound": self._clustering_crop_upper_bound,
+                "max_cluster_radius": self._clustering_max_cluster_radius,
+                "point_fraction": self._clustering_distance_calc_point_fraction,
+                "debug_level": self._debug_level,
+            },
+            callback=partial(
+                self._clustering_worker_finished_callback,
+                path_odom=path_odom,
+                pc_counter=self.pc_counter,
+            ),
+        )
+        print(f"set everything up for payload cloud {self.pc_counter}")
+
+    def posegraph_changed_callback(self, posegraph_msg):
+        self.pose_graph_stamps = [
+            pose.header.stamp for pose in posegraph_msg.path.poses
+        ]
         with self.tree_manager_lock:
             self._tree_manager.update_poses(
                 posegraph_msg.path.poses,
@@ -494,6 +436,7 @@ class ForestAnalysis:
         label_positions = []
         mesh_messages = MarkerArray()
 
+        # trees with labels
         for tree, reco_flags, coverage_angle in zip(
             self._tree_manager.trees,
             self._tree_manager.tree_reco_flags,
@@ -516,6 +459,20 @@ class ForestAnalysis:
 
         self._pub_tree_meshes.publish(mesh_messages)
         self.publish_cluster_labels(label_texts, label_positions)
+
+        # Terrain
+        verts, tris = self._tree_manager.get_terrain()
+        self._pub_terrain_model.publish(
+            self.genereate_mesh_msg(
+                verts,
+                tris,
+                frame_id=self._odom_frame_id,
+                time_stamp=self.last_pc_header.stamp,
+                color=[0.35, 0.35, 0.35],
+                alpha=1.0,
+                id=0,
+            )
+        )
 
     def apply_transform(
         self,
@@ -551,6 +508,7 @@ class ForestAnalysis:
 
     def shutdown_routine(self, *args):
         """Executes the operations before killing the mission analysis procedures"""
+        self._clustering_pool.close()
         rospy.loginfo("Digiforest Analysis node stopped!")
 
 
@@ -593,6 +551,8 @@ class TreeManager:
 
         self.num_trees = 0
         self._last_cluster_time = None
+
+        self.terrains = []
 
         self.capture_Ts_with_stamps: List[dict] = []
 
@@ -770,6 +730,153 @@ class TreeManager:
             }
 
         self.add_clusters(clusters_base)
+
+    def get_terrain(self) -> np.ndarray:
+        """Returns the terrain of the entire map in a 2.5D meshgrid format.
+
+        Returns:
+            np.ndarray: MxNx3 grid where the last axis are for x, y, z and the other two
+                axes are the x and y coordinates of the gridpoints.
+        """
+
+        def shape_fun(x: np.ndarray, r: float):
+            """This shape function is used to weight the contribution of a map to the
+            final terrain map. It is a gaussian centered at the sensor position with
+            standard deviation r.
+
+            Args:
+                x (np.ndarray): array of distances to the sensor
+                r (float): standard deviation
+
+            Returns:
+                np.ndarray: array of weights
+            """
+            return np.exp(-(x**2) / r**2)
+
+        # find most recent sensor transforms using time stamp of terrain maps
+        sensor_transforms = []
+        terrains = []
+        pose_graph_stamps = [t["stamp"] for t in self.capture_Ts_with_stamps]
+        for terrain in self.terrains:
+            if terrain["time_stamp"] not in pose_graph_stamps:
+                print(f"terrain time stamp {terrain['time_stamp']} not in posegraph")
+                continue
+            else:
+                terrains.append(terrain)
+                sensor_transform = self.capture_Ts_with_stamps[
+                    pose_graph_stamps.index(terrain["time_stamp"])
+                ]["pose"]
+                sensor_transforms.append(sensor_transform)
+
+        # aggregate database entries into lists
+        meshes_odom = [
+            deepcopy(terrain["mesh"]).apply_transform(terrain["sensor_transform"])
+            for terrain in terrains
+        ]
+
+        bboxes = np.asarray(
+            [
+                (mesh.vertices.min(axis=0), mesh.vertices.max(axis=0))
+                for mesh in meshes_odom
+            ]
+        )
+        map_radii = (bboxes[:, 1, :] - bboxes[:, 0, :])[:, :2].min(axis=1) / 2
+
+        # generate a regular grid of query points for the final terrain map
+        bbox = [bboxes.reshape(-1, 3).min(axis=0), bboxes.reshape(-1, 3).max(axis=0)]
+        (query_X, query_Y,) = np.meshgrid(
+            np.arange(bbox[0][0], bbox[1][0], self.terrains[0]["cell_size"]),
+            np.arange(bbox[0][1], bbox[1][1], self.terrains[0]["cell_size"]),
+        )
+        query_positions = np.stack(
+            (query_X, query_Y, -100 * np.ones_like(query_X)), axis=2
+        )
+        query_positions = query_positions.reshape(-1, 3)
+        query_rays = np.zeros_like(query_positions)
+        query_rays[:, 2] = 1.0
+
+        # aggregate all maps into a single tensor of map heights and weights
+        heights = np.ones((*query_X.shape, len(self.terrains)))
+        weights = np.zeros((*query_X.shape, len(self.terrains)))
+        for i, terrain in enumerate(self.terrains):
+            mesh_odom = deepcopy(terrain["mesh"])
+            mesh_odom = mesh_odom.apply_transform(terrain["sensor_transform"])
+            # querying all rays is not slower than preselecting the rays
+            # inside the meshe's bounding box.
+            tri_inds = mesh_odom.ray.intersects_first(query_positions, query_rays)
+            verts_mask = tri_inds != -1
+            tri_inds = tri_inds[verts_mask]
+            # just take the center of the tri as an approximation
+            intersects = mesh_odom.vertices[mesh_odom.faces[tri_inds]].mean(axis=1)
+            heights[verts_mask.reshape(query_X.shape), i] = intersects[:, 2]
+            weights[verts_mask.reshape(query_X.shape), i] = shape_fun(
+                np.linalg.norm(intersects - sensor_transforms[i][:3, 3], axis=1),
+                0.5 * map_radii[i],
+            )
+        heights = np.sum(heights * weights, axis=2) / weights.sum(axis=2)
+
+        # convert to vertices and triangles
+        mgrid = np.stack((query_X, query_Y, heights), axis=2)
+        verts, tris = TerrainFitting().meshgrid_to_mesh(mgrid)
+
+        # remove verts with nan
+        nan_mask = np.isnan(verts[:, 2])
+        # remove verts where there are not many maps contributing strongly
+        weights_mask = (weights.sum(axis=2) < 0.01 * len(self.terrains)).reshape(-1)
+
+        # # for debugging puproposes, use this to tune the value of the threshold
+        # from matplotlib import pyplot as plt
+        # plt.imshow(weights_mask.reshape(query_X.shape)*1 + nan_mask.reshape(query_X.shape)*1)
+        # plt.colorbar()
+        # plt.show()
+
+        verts_mask = np.logical_or(nan_mask, weights_mask)
+        remove_indices = np.where(verts_mask)[0]
+        tri_mask = np.any(np.isin(tris, remove_indices), axis=1)
+        tris = tris[~tri_mask]
+
+        # flip normals
+        tris = np.flip(tris, axis=1)
+
+        return verts, tris
+
+    def add_terrain(
+        self,
+        terrain_mesh_base_verts: np.ndarray,
+        terrain_mesh_base_tris: np.ndarray,
+        time_stamp: rospy.Time,
+        sensor_transform: np.ndarray,
+        cell_size: float,
+    ):
+        """Adds the local terrain to the terrain accumulator. Also updates the
+        basepoints of all trees.
+
+        Args:
+            terrain (np.ndarray): Nx3 array of points describing the terrain
+        """
+        terrain_base = trimesh.Trimesh(
+            terrain_mesh_base_verts.astype(np.float64),
+            terrain_mesh_base_tris.astype(np.int64),
+            use_embree=True,
+        )
+        # export trimesh
+        min_cos = terrain_mesh_base_verts.min(axis=0)
+        max_cos = terrain_mesh_base_verts.max(axis=0)
+
+        retval = {
+            "mesh": terrain_base,
+            "bbox": [min_cos, max_cos],
+            "time_stamp": time_stamp,
+            "sensor_transform": sensor_transform,
+            "cell_size": cell_size,
+        }
+
+        with open(
+            f"/home/ori/git/digiforest_drs/terrains/terrain_{time_stamp.to_nsec()}.pkl",
+            "wb",
+        ) as file:
+            pickle.dump(retval, file)
+        self.terrains.append(retval)
 
     def update_poses(
         self,
@@ -998,3 +1105,23 @@ class TreeManager:
             os.path.join(path, "csv", file_name_csv), float_format="%.3f", index=False
         )
         df.to_excel(os.path.join(path, "xlsx", file_name_xlsx), index=False)
+
+
+if __name__ == "__main__":
+    tm = TreeManager()
+    for f in os.listdir("/home/ori/git/digiforest_drs/terrains"):
+        with open(os.path.join("/home/ori/git/digiforest_drs/terrains", f), "rb") as f:
+            mesh_dict = pickle.load(f)
+
+        tm.add_terrain(
+            mesh_dict["mesh"].vertices,
+            mesh_dict["mesh"].faces,
+            mesh_dict["time_stamp"],
+            mesh_dict["sensor_transform"],
+            mesh_dict["cell_size"],
+        )
+        tm.capture_Ts_with_stamps.append(
+            {"stamp": mesh_dict["time_stamp"], "pose": mesh_dict["sensor_transform"]}
+        )
+
+    terrain = tm.get_terrain()

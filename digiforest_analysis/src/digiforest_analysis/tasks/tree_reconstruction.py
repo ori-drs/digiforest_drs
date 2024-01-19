@@ -5,6 +5,7 @@ from copy import deepcopy
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 from plotly import graph_objects as go
+import trimesh
 
 
 class Circle:
@@ -194,12 +195,13 @@ class Circle:
             entropy_range = np.max(top_10_entropy) - np.min(top_10_entropy)
             if entropy_range < 1e-12:
                 penalty = np.ones_like(top_10_entropy)
-            penalty = (
-                1 / entropy_weighting
-                + (1 - 1 / entropy_weighting)
-                * (top_10_entropy - np.min(top_10_entropy))
-                / entropy_range
-            )
+            else:
+                penalty = (
+                    1 / entropy_weighting
+                    + (1 - 1 / entropy_weighting)
+                    * (top_10_entropy - np.min(top_10_entropy))
+                    / entropy_range
+                )
             hough_res /= penalty[:, None, None]
 
         # constrain circles to be roughly above previous one
@@ -484,8 +486,8 @@ class Circle:
             for theta in np.linspace(0, 2 * np.pi, num_verts)
         ]
         vertices = np.stack(vertices)
-        basic_tri_1 = np.array([0, 1, num_verts])  # these triangles repeats 100 times
-        basic_tri_2 = np.array([1, num_verts + 1, num_verts])
+        basic_tri_1 = np.array([0, num_verts, 1])  # these triangles repeats 100 times
+        basic_tri_2 = np.array([1, num_verts, num_verts + 1])
         tri_indices = [basic_tri_1 + i for i in range(num_verts)] + [
             basic_tri_2 + i for i in range(num_verts)
         ]
@@ -859,7 +861,9 @@ class Tree:
             bottom_circle = Circle(lower_center, cylinder_radius, cylinder_axis)
             top_circle = Circle(upper_center, cylinder_radius, cylinder_axis)
 
-            return bottom_circle.genereate_cone_frustum_mesh(top_circle)
+            retval = bottom_circle.genereate_cone_frustum_mesh(top_circle)
+            mesh = trimesh.Trimesh(vertices=retval[0], faces=retval[1])
+            return mesh.vertices, mesh.faces
 
     def __str__(self) -> str:
         return f"Tree {self.id} with {len(self.circles)} circles"
