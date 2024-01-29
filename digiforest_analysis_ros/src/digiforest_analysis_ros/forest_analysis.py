@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
+from scipy.stats import multivariate_normal
 from typing import List, Tuple
 from threading import Lock
 from multiprocessing.pool import ThreadPool
@@ -24,12 +25,21 @@ import message_filters
 from geometry_msgs.msg import PoseStamped
 import trimesh
 
-from digiforest_analysis.tasks.terrain_fitting import TerrainFitting
 from digiforest_analysis.tasks.tree_reconstruction import Tree
 from digiforest_analysis.utils.timing import Timer
-from digiforest_analysis_ros.utils import pose2T, clustering_worker_fun
+from digiforest_analysis_ros.utils import (
+    pose2T,
+    clustering_worker_fun,
+    apply_transform,
+)
+from digiforest_analysis.utils.meshing import meshgrid_to_mesh
 
 timer = Timer()
+# ignore divide by zero warnings, code actively works with nans
+np.seterr(divide="ignore", invalid="ignore")
+
+# cd catkin_ws/src/vilens_config/vc_stein_am_rhein/config/procman && rosrun procman_ros sheriff -l frontier.pmd
+# cd ~/logs/logs_evo_finland/exp01 && rosbag play frontier_2023-05-01-14-* --clock --pause --topics /hesai/pandar /alphasense_driver_ros/imu  -r 1
 
 
 class ForestAnalysis:
@@ -45,6 +55,9 @@ class ForestAnalysis:
             self._reco_min_distance,
             self._clustering_crop_upper_bound,
             self._clustering_crop_lower_bound,
+            self._terrain_confidence_stds,
+            self._terrain_confidence_sensor_weight,
+            self._terrain_use_embree,
         )
 
         self.last_pc_header = None
@@ -79,10 +92,6 @@ class ForestAnalysis:
         self._debug_clusters_topic = rospy.get_param(
             "~topic/debug_clusters", "digiforest_forest_analysis/debug/cluster_clouds"
         )
-        self._debug_cluster_labels_topic = rospy.get_param(
-            "~topic/debug_cluster_labels",
-            "digiforest_forest_analysis/debug/cluster_labels",
-        )
 
         # Tree Manager
         self._distance_threshold = rospy.get_param(
@@ -94,6 +103,13 @@ class ForestAnalysis:
         self._reco_min_distance = rospy.get_param(
             "~tree_manager/reco_min_distance", 4.0
         )
+        self._terrain_confidence_stds = rospy.get_param(
+            "~tree_manager/confidence_stds", [3, 5, 5]
+        )
+        self._terrain_confidence_sensor_weight = rospy.get_param(
+            "~tree_manager/confidence_sensor_weight", 0.9999
+        )
+        self._terrain_use_embree = rospy.get_param("~tree_manager/use_embree", True)
 
         # Terrain Fitting
         self._terrain_enabled = rospy.get_param("~terrain/enabled", True)
@@ -192,10 +208,19 @@ class ForestAnalysis:
         )
 
         self._pub_cluster_labels = rospy.Publisher(
-            self._debug_cluster_labels_topic, MarkerArray, queue_size=1, latch=True
+            "digiforest_forest_analysis/debug/cluster_clouds",
+            MarkerArray,
+            queue_size=1,
+            latch=True,
         )
         self._pub_cropped_pc = rospy.Publisher(
             "digiforest_forest_analysis/debug/cropped_pc",
+            PointCloud2,
+            queue_size=1,
+            latch=True,
+        )
+        self._pub_tree_clusters = rospy.Publisher(
+            "digiforest_forest_analysis/debug/tree_clusters",
             PointCloud2,
             queue_size=1,
             latch=True,
@@ -319,14 +344,11 @@ class ForestAnalysis:
             marker_array.markers.append(marker)
 
         self._pub_cluster_labels.publish(marker_array)
-        if self._debug_level > 0:
-            print(
-                f"Published {len(labels)} cluster labels on the topic {self._debug_cluster_labels_topic}"
-            )
 
     def _clustering_worker_finished_callback(
         self, result, path_odom: np.ndarray, pc_counter: int
     ):
+        print("clustering worker finished callback")
         clusters, terrain = result
         with timer("cwc"):
             with timer("cwc/publishing_clustering"):
@@ -334,6 +356,7 @@ class ForestAnalysis:
                     self._pub_debug_clusters,
                     clouds=[
                         c["cloud"]
+                        .clone()
                         .transform(c["info"]["sensor_transform"])
                         .point.positions.numpy()
                         for c in clusters
@@ -344,25 +367,28 @@ class ForestAnalysis:
             with timer("cwc/tree_manager"):
                 path_odom = np.array(
                     [
-                        [p.pose.position.x, p.pose.position.y, p.pose.position.z]
+                        [
+                            p.pose.position.x,
+                            p.pose.position.y,
+                            p.pose.position.z,
+                            p.pose.orientation.x,
+                            p.pose.orientation.y,
+                            p.pose.orientation.z,
+                            p.pose.orientation.w,
+                        ]
                         for p in path_odom.poses
                     ]
                 )
                 with self.tree_manager_lock:
                     self._tree_manager.add_clusters_with_path(clusters, path_odom)
                     sensor_transform = clusters[0]["info"]["sensor_transform"]
-                    verts, tris = TerrainFitting().meshgrid_to_mesh(terrain)
-                    verts = self.apply_transform(
-                        verts,
-                        sensor_transform[:3, 3],
-                        sensor_transform[:3, :3],
-                        inverse=True,
-                    )
+                    verts_odom, tris_odom = meshgrid_to_mesh(terrain)
                     self._tree_manager.add_terrain(
-                        verts,
-                        tris,
+                        verts_odom,
+                        tris_odom,
                         clusters[0]["info"]["time_stamp"],
                         sensor_transform,
+                        path_odom,
                         self._terrain_cloth_cell_size,
                     )
             with timer("cwc/publishing_tree_manager"):
@@ -437,6 +463,8 @@ class ForestAnalysis:
         mesh_messages = MarkerArray()
 
         # trees with labels
+        tree_clouds = []
+        tree_colors = []
         for tree, reco_flags, coverage_angle in zip(
             self._tree_manager.trees,
             self._tree_manager.tree_reco_flags,
@@ -456,9 +484,30 @@ class ForestAnalysis:
                     verts, tris, id=tree.id, frame_id=self._odom_frame_id
                 )
             )
+            # if len(tree.clusters) > 5:
+            #     # sample random hue and for all clusters random brighntess between 0.5 and 1
+            #     hue = np.random.rand()
+            #     lightness = [
+            #         np.random.rand() * 0.6 + 0.2 for _ in range(len(tree.clusters))
+            #     ]
+            #     tree_colors.extend([colorsys.hls_to_rgb(hue, l, 1.0) for l in lightness])
+            #     # add voxel downsampled pcs to tree_clouds
+            #     tree_clouds.extend(
+            #         [
+            #             cluster["cloud"]
+            #             .clone()
+            #             .transform(cluster["info"]["sensor_transform"])
+            #             .point.positions.numpy()
+            #             for cluster in tree.clusters
+            #         ]
+            #     )
 
         self._pub_tree_meshes.publish(mesh_messages)
         self.publish_cluster_labels(label_texts, label_positions)
+        if len(tree_clouds) > 0:
+            self.publish_pointclouds(
+                self._pub_tree_clusters, tree_clouds, tree_colors, self._odom_frame_id
+            )
 
         # Terrain
         verts, tris = self._tree_manager.get_terrain()
@@ -468,43 +517,11 @@ class ForestAnalysis:
                 tris,
                 frame_id=self._odom_frame_id,
                 time_stamp=self.last_pc_header.stamp,
-                color=[0.35, 0.35, 0.35],
+                color=[0.5, 0.5, 0.5],
                 alpha=1.0,
                 id=0,
             )
         )
-
-    def apply_transform(
-        self,
-        points: np.ndarray,
-        translation: np.ndarray,
-        rotation: np.ndarray,
-        inverse: bool = False,
-    ) -> np.ndarray:
-        """Transforms the given points by the given translation and rotation.
-        Optionally performs the inverse transformation.
-
-        Args:
-            points (np.ndarray): Nx3 array of points to be transformed
-            translation (np.ndarray): 3x1 array of translation
-            rotation (np.ndarray): 3x3 rotation matrix or 4x1 quaternion
-            inverse (bool, optional): Flag to calculate inverse. Defaults to False.
-
-        Returns:
-            np.ndarray: Nx3 array of transformed points
-        """
-        if rotation.shape[0] == 4:
-            rot_mat = Rotation.from_quat(rotation).as_matrix()
-        elif rotation.shape == (3, 3):
-            rot_mat = rotation
-        else:
-            raise ValueError("rotation must be given as 3x3 matrix or quaternion")
-        if inverse:
-            points = (points - translation) @ rot_mat
-        else:
-            points = points @ rot_mat.T + translation
-
-        return points
 
     def shutdown_routine(self, *args):
         """Executes the operations before killing the mission analysis procedures"""
@@ -520,6 +537,9 @@ class TreeManager:
         reco_min_distance: float = 4.0,
         crop_upper_bound: float = 1.0,
         crop_lower_bound: float = 3.0,
+        terrain_confidence_stds: list = [3, 10, 10],
+        terrain_confidence_sensor_weight: float = 0.9999,
+        terrain_use_embree: bool = True,
     ) -> None:
         """constructor of the TreeManager class
 
@@ -537,12 +557,22 @@ class TreeManager:
                 cropping during clustering.
             crop_upper_bound (float, optional): Upper bounding height in m used for
                 cropping during clustering.
+            terrain_confidence_stds (float, optional): Variances of confidence model.
+                Moving the sensor along its x axis to the ground, this variances along
+                the sensor axis is used to evaluate the extent of the confidence region.
+            terrain_confidence_sensor_weight  (list, optional): weighs the path-based
+                confidence model wrt just the distance of the ground mesh from the path.
+            use_embree (bool, optional): Flag to use Embree for ray tracing (faster but
+                inferior quality). Defaults to True.
         """
         self.distance_threshold = distance_threshold
         self.reco_min_angle_coverage = reco_min_angle_coverage
         self.reco_min_distance = reco_min_distance
         self.crop_upper_bound = crop_upper_bound
         self.crop_lower_bound = crop_lower_bound
+        self.terrain_confidence_stds = terrain_confidence_stds
+        self.terrain_confidence_sensor_weight = terrain_confidence_sensor_weight
+        self.use_embree = terrain_use_embree
 
         self.tree_reco_flags: List[List[bool]] = []
         self.tree_coverage_angles: List[float] = []
@@ -739,20 +769,6 @@ class TreeManager:
                 axes are the x and y coordinates of the gridpoints.
         """
 
-        def shape_fun(x: np.ndarray, r: float):
-            """This shape function is used to weight the contribution of a map to the
-            final terrain map. It is a gaussian centered at the sensor position with
-            standard deviation r.
-
-            Args:
-                x (np.ndarray): array of distances to the sensor
-                r (float): standard deviation
-
-            Returns:
-                np.ndarray: array of weights
-            """
-            return np.exp(-(x**2) / r**2)
-
         # find most recent sensor transforms using time stamp of terrain maps
         sensor_transforms = []
         terrains = []
@@ -770,7 +786,7 @@ class TreeManager:
 
         # aggregate database entries into lists
         meshes_odom = [
-            deepcopy(terrain["mesh"]).apply_transform(terrain["sensor_transform"])
+            deepcopy(terrain["mesh_base"]).apply_transform(terrain["sensor_transform"])
             for terrain in terrains
         ]
 
@@ -780,7 +796,6 @@ class TreeManager:
                 for mesh in meshes_odom
             ]
         )
-        map_radii = (bboxes[:, 1, :] - bboxes[:, 0, :])[:, :2].min(axis=1) / 2
 
         # generate a regular grid of query points for the final terrain map
         bbox = [bboxes.reshape(-1, 3).min(axis=0), bboxes.reshape(-1, 3).max(axis=0)]
@@ -799,38 +814,44 @@ class TreeManager:
         heights = np.ones((*query_X.shape, len(self.terrains)))
         weights = np.zeros((*query_X.shape, len(self.terrains)))
         for i, terrain in enumerate(self.terrains):
-            mesh_odom = deepcopy(terrain["mesh"])
+            mesh_odom = deepcopy(terrain["mesh_base"])
+            mesh_weights = terrain["vertex_weights"]
+            # convert to odom frame
             mesh_odom = mesh_odom.apply_transform(terrain["sensor_transform"])
             # querying all rays is not slower than preselecting the rays
             # inside the meshe's bounding box.
+            # find indices in triangles where rays hit mesh
             tri_inds = mesh_odom.ray.intersects_first(query_positions, query_rays)
             verts_mask = tri_inds != -1
             tri_inds = tri_inds[verts_mask]
             # just take the center of the tri as an approximation
             intersects = mesh_odom.vertices[mesh_odom.faces[tri_inds]].mean(axis=1)
             heights[verts_mask.reshape(query_X.shape), i] = intersects[:, 2]
-            weights[verts_mask.reshape(query_X.shape), i] = shape_fun(
-                np.linalg.norm(intersects - sensor_transforms[i][:3, 3], axis=1),
-                0.5 * map_radii[i],
-            )
+            weights[verts_mask.reshape(query_X.shape), i] = mesh_weights[
+                mesh_odom.faces[tri_inds]
+            ].mean(axis=1)
         heights = np.sum(heights * weights, axis=2) / weights.sum(axis=2)
 
         # convert to vertices and triangles
         mgrid = np.stack((query_X, query_Y, heights), axis=2)
-        verts, tris = TerrainFitting().meshgrid_to_mesh(mgrid)
+        verts, tris = meshgrid_to_mesh(mgrid)
 
         # remove verts with nan
         nan_mask = np.isnan(verts[:, 2])
-        # remove verts where there are not many maps contributing strongly
-        weights_mask = (weights.sum(axis=2) < 0.01 * len(self.terrains)).reshape(-1)
+        # remove verts where there are no maps contributing strongly
+        weights_mask = weights.max(axis=2) < 0.1 * (
+            1 - self.terrain_confidence_sensor_weight
+        )
 
         # # for debugging puproposes, use this to tune the value of the threshold
         # from matplotlib import pyplot as plt
+        # # plt.imshow(weights_mask.reshape(query_X.shape))
         # plt.imshow(weights_mask.reshape(query_X.shape)*1 + nan_mask.reshape(query_X.shape)*1)
+        # # plt.imshow(weights.max(axis=2))
         # plt.colorbar()
         # plt.show()
 
-        verts_mask = np.logical_or(nan_mask, weights_mask)
+        verts_mask = np.logical_or(nan_mask, weights_mask.reshape(-1))
         remove_indices = np.where(verts_mask)[0]
         tri_mask = np.any(np.isin(tris, remove_indices), axis=1)
         tris = tris[~tri_mask]
@@ -842,10 +863,11 @@ class TreeManager:
 
     def add_terrain(
         self,
-        terrain_mesh_base_verts: np.ndarray,
-        terrain_mesh_base_tris: np.ndarray,
+        terrain_mesh_odom_verts: np.ndarray,
+        terrain_mesh_odom_tris: np.ndarray,
         time_stamp: rospy.Time,
         sensor_transform: np.ndarray,
+        path_odom: np.ndarray,
         cell_size: float,
     ):
         """Adds the local terrain to the terrain accumulator. Also updates the
@@ -854,20 +876,95 @@ class TreeManager:
         Args:
             terrain (np.ndarray): Nx3 array of points describing the terrain
         """
-        terrain_base = trimesh.Trimesh(
+
+        def measurement_likelihood(verts, path):
+            # calculate distances from sensor to all verts
+            rot_mats = np.array([Rotation.from_quat(p[3:]).as_matrix() for p in path])
+            means = 9.0 * rot_mats[:, :, 0] + path[:, :3]
+            variances = (
+                rot_mats
+                @ np.diag(self.terrain_confidence_stds) ** 2
+                @ rot_mats.transpose([0, 2, 1])
+            )
+            weights_sensor = [
+                multivariate_normal.pdf(verts, mean, var)
+                for mean, var in zip(means, variances)
+            ]
+            weights_sensor = np.array(weights_sensor).sum(axis=0)
+            weights_sensor /= weights_sensor.max()
+            weights_distance = np.linalg.norm(
+                verts[:, None, :] - path[:, :3], axis=2
+            ).min(axis=1)
+            max_distance = weights_distance.max()
+            weights_distance = np.sqrt(0.5) * max_distance - weights_distance
+            weights_distance /= np.sqrt(0.5) * max_distance
+            weights_distance = np.clip(weights_distance, 0, 1)
+            weights = (
+                (1 - self.terrain_confidence_sensor_weight) * weights_distance
+                + self.terrain_confidence_sensor_weight * weights_sensor
+            )
+
+            # # for debugging puproposes, use this for visualization
+            # from matplotlib import pyplot as plt
+            # ax = plt.subplot(projection="3d")
+            # ax.scatter(verts[:, 0], verts[:, 1], verts[:, 2], c=weights, vmin=0, vmax=1, alpha=1, zorder=-1)
+            # # ax.scatter(means[:, 0], means[:, 1], means[:, 2], color="green", s=20)
+            # ax.set_box_aspect([1.0, 1.0, 1.0])
+            # for m, r in zip(path, rot_mats):
+            #     ax.plot(
+            #         [m[0], m[0] + r[0, 0]],
+            #         [m[1], m[1] + r[1, 0]],
+            #         [m[2], m[2] + r[2, 0]],
+            #         color="red",
+            #         zorder=2,
+            #         linewidth=2.
+            #     )
+            #     ax.plot(
+            #         [m[0], m[0] + r[0, 1]],
+            #         [m[1], m[1] + r[1, 1]],
+            #         [m[2], m[2] + r[2, 1]],
+            #         color="green",
+            #         zorder=2,
+            #         linewidth=2.
+            #     )
+            #     ax.plot(
+            #         [m[0], m[0] + r[0, 2]],
+            #         [m[1], m[1] + r[1, 2]],
+            #         [m[2], m[2] + r[2, 2]],
+            #         color="blue",
+            #         zorder=2,
+            #         linewidth=2.
+            #     )
+            # ax.plot(path[:, 0], path[:, 1], path[:, 2], color="red")
+            # set_axes_equal(ax)
+            # plt.show()
+
+            return weights
+
+        weights = measurement_likelihood(terrain_mesh_odom_verts, path_odom)
+        terrain_mesh_base_verts = apply_transform(
+            terrain_mesh_odom_verts,
+            sensor_transform[:3, 3],
+            sensor_transform[:3, :3],
+            inverse=True,
+        )
+        terrain_mesh_base_tris = terrain_mesh_odom_tris.copy()
+
+        terrain_mesh_base = trimesh.Trimesh(
             terrain_mesh_base_verts.astype(np.float64),
             terrain_mesh_base_tris.astype(np.int64),
-            use_embree=True,
+            use_embree=self.use_embree,
         )
-        # export trimesh
-        min_cos = terrain_mesh_base_verts.min(axis=0)
-        max_cos = terrain_mesh_base_verts.max(axis=0)
 
         retval = {
-            "mesh": terrain_base,
-            "bbox": [min_cos, max_cos],
+            "mesh_base": terrain_mesh_base,
+            "mesh_odom": trimesh.Trimesh(
+                terrain_mesh_odom_verts, terrain_mesh_odom_tris
+            ),
             "time_stamp": time_stamp,
             "sensor_transform": sensor_transform,
+            "vertex_weights": weights,
+            "path": path_odom,
             "cell_size": cell_size,
         }
 
@@ -1110,14 +1207,17 @@ class TreeManager:
 if __name__ == "__main__":
     tm = TreeManager()
     for f in os.listdir("/home/ori/git/digiforest_drs/terrains"):
+        if ".pkl" not in f:
+            continue
         with open(os.path.join("/home/ori/git/digiforest_drs/terrains", f), "rb") as f:
             mesh_dict = pickle.load(f)
 
         tm.add_terrain(
-            mesh_dict["mesh"].vertices,
-            mesh_dict["mesh"].faces,
+            mesh_dict["mesh_odom"].vertices,
+            mesh_dict["mesh_odom"].faces,
             mesh_dict["time_stamp"],
             mesh_dict["sensor_transform"],
+            mesh_dict["path"],
             mesh_dict["cell_size"],
         )
         tm.capture_Ts_with_stamps.append(
@@ -1125,3 +1225,5 @@ if __name__ == "__main__":
         )
 
     terrain = tm.get_terrain()
+    # terrain = trimesh.Trimesh(terrain[0], terrain[1])
+    # terrain.show()

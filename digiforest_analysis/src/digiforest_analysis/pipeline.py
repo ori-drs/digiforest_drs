@@ -1,7 +1,7 @@
 # from open3d.geometry import PointCloud
 from digiforest_analysis.tasks import Preprocessing
 from digiforest_analysis.tasks import GroundSegmentation
-from digiforest_analysis.tasks import TreeSegmentation
+from digiforest_analysis.tasks import TreeSegmentationVoronoi
 from digiforest_analysis.tasks import TreeAnalysis
 from digiforest_analysis.tasks import ForestAnalysis
 from digiforest_analysis.tasks import TemporalAnalysis
@@ -36,7 +36,7 @@ class Pipeline:
         self._ground_segmentation = GroundSegmentation(**params)
 
         params = kwargs.get("tree_segmentation", {})
-        self._tree_segmentation = TreeSegmentation(**params)
+        self._tree_segmentation = TreeSegmentationVoronoi(**params)
 
         params = kwargs.get("tree_analysis", {})
         self._tree_analysis = TreeAnalysis(**params)

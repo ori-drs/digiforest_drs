@@ -18,8 +18,7 @@ class BaseTask:
     def process(self, **kwargs):
         with self._timer(f"{self.__class__.__name__}"):
             output = self._process(**kwargs)
-        if self._debug_level > 0:
-            print(self._timer, end="")
+        print(self._timer, end="")
         return output
 
     @property

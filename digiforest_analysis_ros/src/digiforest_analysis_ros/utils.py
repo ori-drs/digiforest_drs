@@ -6,7 +6,7 @@ import rospy
 
 from sensor_msgs.msg import PointCloud2
 from digiforest_analysis.tasks.terrain_fitting import TerrainFitting
-from digiforest_analysis.tasks.tree_segmentation_voronoi import TreeSegmentation
+from digiforest_analysis.tasks.tree_segmentation_voronoi import TreeSegmentationVoronoi
 
 
 def pose2T(orientation, position):
@@ -97,7 +97,7 @@ def clustering_worker_fun(
         debug_level=debug_level,
     )
 
-    tree_segmenter = TreeSegmentation(
+    tree_segmenter = TreeSegmentationVoronoi(
         debug_level=debug_level,
     )
 
@@ -151,3 +151,66 @@ def clustering_worker_fun(
     rospy.loginfo(f"Timing results of clustering:\n{timer}")
 
     return clusters, terrain
+
+
+def apply_transform(
+    points: np.ndarray,
+    translation: np.ndarray,
+    rotation: np.ndarray,
+    inverse: bool = False,
+) -> np.ndarray:
+    """Transforms the given points by the given translation and rotation.
+    Optionally performs the inverse transformation.
+
+    Args:
+        points (np.ndarray): Nx3 array of points to be transformed
+        translation (np.ndarray): 3x1 array of translation
+        rotation (np.ndarray): 3x3 rotation matrix or 4x1 quaternion
+        inverse (bool, optional): Flag to calculate inverse. Defaults to False.
+
+    Returns:
+        np.ndarray: Nx3 array of transformed points
+    """
+    points = points.copy()
+    if rotation.shape[0] == 4:
+        rot_mat = Rotation.from_quat(rotation).as_matrix()
+    elif rotation.shape == (3, 3):
+        rot_mat = rotation
+    else:
+        raise ValueError("rotation must be given as 3x3 matrix or quaternion")
+    if inverse:
+        points = (points - translation) @ rot_mat
+    else:
+        points = points @ rot_mat.T + translation
+
+    return points
+
+
+def set_axes_equal(ax):
+    # from https://stackoverflow.com/questions/13685386/how-to-set-the-equal-aspect-ratio-for-all-axes-x-y-z
+    """
+    Make axes of 3D plot have equal scale so that spheres appear as spheres,
+    cubes as cubes, etc.
+
+    Input
+      ax: a matplotlib axis, e.g., as output from plt.gca().
+    """
+
+    x_limits = ax.get_xlim3d()
+    y_limits = ax.get_ylim3d()
+    z_limits = ax.get_zlim3d()
+
+    x_range = abs(x_limits[1] - x_limits[0])
+    x_middle = np.mean(x_limits)
+    y_range = abs(y_limits[1] - y_limits[0])
+    y_middle = np.mean(y_limits)
+    z_range = abs(z_limits[1] - z_limits[0])
+    z_middle = np.mean(z_limits)
+
+    # The plot bounding box is a sphere in the sense of the infinity
+    # norm, hence I call half the max range the plot radius.
+    plot_radius = 0.5 * max([x_range, y_range, z_range])
+
+    ax.set_xlim3d([x_middle - plot_radius, x_middle + plot_radius])
+    ax.set_ylim3d([y_middle - plot_radius, y_middle + plot_radius])
+    ax.set_zlim3d([z_middle - plot_radius, z_middle + plot_radius])

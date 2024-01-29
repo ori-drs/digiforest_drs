@@ -1,4 +1,6 @@
 from .base_task import BaseTask
+from .tree_segmentation_voronoi import TreeSegmentationVoronoi
+from .terrain_fitting import TerrainFitting
 from .preprocessing import Preprocessing
 from .forest_analysis import ForestAnalysis
 from .ground_segmentation import GroundSegmentation

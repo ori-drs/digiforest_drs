@@ -1,7 +1,7 @@
 from functools import partial
 from multiprocessing import Pool
 import multiprocessing
-from digiforest_analysis.utils.timing import Timer
+import time
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 from sklearn.decomposition import PCA
@@ -9,6 +9,8 @@ import open3d as o3d
 from scipy.spatial import cKDTree
 
 from digiforest_analysis.tasks.tree_reconstruction import Circle
+from digiforest_analysis.utils.timing import Timer
+from digiforest_analysis.utils.meshing import meshgrid_to_mesh
 
 timer = Timer()
 
@@ -226,6 +228,18 @@ def voronoi(  # noqa: C901
 
     labels = -np.ones(cloud.point.positions.shape[0], dtype=np.int32)
 
+    if debug_level > 1:
+        if cloth is None:
+            print("VIZ: Input Cloud")
+            o3d.visualization.draw_geometries([cloud.to_legacy()])
+        else:
+            print("VIZ: Input Cloud with Cloth")
+            verts, tris = meshgrid_to_mesh(cloth)
+            verts_vec = o3d.utility.Vector3dVector(verts)
+            tris_vec = o3d.utility.Vector3iVector(np.flip(tris, axis=1))
+            terrain_mesh = o3d.geometry.TriangleMesh(verts_vec, tris_vec)
+            o3d.visualization.draw_geometries([cloud.to_legacy(), terrain_mesh])
+
     # 1. Normalize heights
     with timer("normalizing heights"):
         if cloth is not None:
@@ -239,6 +253,10 @@ def voronoi(  # noqa: C901
             heights = height_interpolator(cloud.point.positions.numpy()[:, :2])
             cloud.point.positions[:, 2] -= heights.astype(np.float32)
 
+    if debug_level > 1:
+        print("VIZ: Height-normalized Cloud")
+        o3d.visualization.draw_geometries([cloud.to_legacy()])
+
     # 2. Crop point cloud between cluster_strip_min and cluster_strip_max
     with timer("cropping"):
         points_numpy = cloud.point.positions.numpy()
@@ -250,6 +268,7 @@ def voronoi(  # noqa: C901
             cloud.point.positions[:, 2] += heights.astype(np.float32)
 
     if debug_level > 1:
+        print("VIZ: Cropped cloud for clustering")
         o3d.visualization.draw_geometries([cluster_strip.to_legacy()])
 
     # 3. Perform db scan clustering after removing outliers
@@ -264,6 +283,7 @@ def voronoi(  # noqa: C901
         ).numpy()
 
     if debug_level > 1:
+        print("VIZ: Clusters of DBSCAN Clustering")
         max_label = np.max(labels_pre)
         dbscan_clusters = []
         for i in range(max_label):
@@ -273,6 +293,7 @@ def voronoi(  # noqa: C901
         o3d.visualization.draw_geometries(dbscan_clusters)
 
     # 4. Clean up non-stem points using hough transform
+    hough_times = []
     with timer("hough"):
         max_label = np.max(labels_pre)
         axes = []
@@ -298,10 +319,12 @@ def voronoi(  # noqa: C901
                         )
                     continue
             # 4.2. Find circles in projection of cloud onto x-y plane
+            TIME = time.perf_counter_ns()
+
             with timer("hough->hough circle"):
                 # slice crop at middle
                 middle = (crop_lower_bound + crop_upper_bound) / 2
-                slice_height = 0.2  # m
+                slice_height = crop_upper_bound - crop_lower_bound  # m
                 slice = cluster_points[
                     np.logical_and(
                         cluster_points[:, 2] > middle - slice_height / 2,
@@ -329,6 +352,7 @@ def voronoi(  # noqa: C901
                     print(
                         f"Center coordinates of hough circle: ({circ.x}, {circ.y}), Radius: {circ.radius}, Maximum vote: {votes.max()}"
                     )
+            hough_times.append(time.perf_counter_ns() - TIME)
 
             # 4.3. Remove points that are not close to the circle
             with timer("hough->filter"):
@@ -367,7 +391,16 @@ def voronoi(  # noqa: C901
                     )
                 axes.append(axis_dict)
 
+    if debug_level > 0:
+        print(
+            "Hough times mean:",
+            np.mean(hough_times) * 1e-6,
+            "sum:",
+            np.sum(hough_times) * 1e-6,
+        )
+
     if debug_level > 1:
+        print("VIZ: Fitted Axes")
         cylinders = []
         for axis in axes:
             cylinder_height = crop_upper_bound - crop_lower_bound

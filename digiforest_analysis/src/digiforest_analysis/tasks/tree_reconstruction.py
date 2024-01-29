@@ -1,3 +1,4 @@
+from itertools import product
 from typing import Iterable, Union, Tuple
 import numpy as np
 from skimage.transform import hough_circle
@@ -5,6 +6,7 @@ from copy import deepcopy
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 from plotly import graph_objects as go
+from scipy.spatial import cKDTree
 import trimesh
 
 
@@ -32,9 +34,9 @@ class Circle:
     def from_cloud_hough(
         cls,
         points: np.ndarray,
-        grid_res: float,
-        min_radius: float,
-        max_radius: float,
+        grid_res: float = 0.02,
+        min_radius: float = 0.05,
+        max_radius: float = 0.5,
         point_ratio: float = 0.0,
         previous_center: np.ndarray = None,
         search_radius: float = None,
@@ -322,6 +324,121 @@ class Circle:
         return best_model, best_inliers
 
     @classmethod
+    def from_cloud_ransahc(
+        cls,
+        points,
+        min_radius: float = 0.0,
+        max_radius: float = np.inf,
+        max_points: int = 100,
+        search_radius: float = 0.05,
+        sample_percentage: float = 0.01,
+        sampling: str = "weighted",
+    ):
+        if len(points) < 10:
+            return None
+        points = points[:, :2]
+        # sampling triplets of points
+        if sampling == "weighted" or (
+            len(points) > (np.inf if max_points in (-1, None) else max_points)
+        ):
+            # construct weights by distance to closest neighbor i.e. local density
+            dist_to_closest_neighbor = cKDTree(points).query(points, k=2)[0][:, 1]
+            probas = np.exp(-dist_to_closest_neighbor)
+            probas -= probas.min()
+            probas /= probas.max()
+        if len(points) > (np.inf if max_points in (-1, None) else max_points):
+            # resample points if more than max_samples
+            indices = np.random.choice(
+                len(points), max_points, p=probas / probas.sum(), replace=False
+            )
+            points = points[indices]
+            probas = probas[indices]
+
+        num_points = points.shape[0]
+        num_samples = int(
+            num_points * (num_points - 1) * (num_points - 2) * sample_percentage
+        )
+        num_samples = max(num_samples, num_points)
+
+        if sampling == "weighted":
+            indices = (
+                (1 - np.random.rand(num_samples, len(points)) * probas)
+            ).argpartition(3, axis=1)[:, :3]
+        elif sampling == "random":
+            indices = ((1 - np.random.rand(num_samples, len(points)))).argpartition(
+                3, axis=1
+            )[:, :3]
+        elif sampling == "full":
+            indices = np.array(list(product(range(len(points)), repeat=3)))
+            mask = np.logical_and(
+                indices[:, 0] != indices[:, 1], indices[:, 0] != indices[:, 2]
+            )
+            mask = np.logical_and(mask, indices[:, 1] != indices[:, 2])
+            indices = indices[mask]
+        else:
+            raise ValueError("sampling must be one of 'weighted', 'random', 'full'")
+
+        circle_points = points[indices]  # num_samples x 3 x 2
+
+        # fitting circles to triplets
+        circles = cls.from_3_2d_points(circle_points, method="bisectors")
+        circles = circles[circles[:, 2] < max_radius]
+        circles = circles[circles[:, 2] > min_radius]
+        if len(circles) == 0:
+            return None
+
+        # # fitting quality
+        # with timer("resampling circles"):
+        #     dists = np.linalg.norm(slice - circles[:, None, :2], axis=2) # num_samples x len(slice)
+        #     dists = dists - circles[:, 2][:, None]
+        #     dists[dists < 0] *= -10
+        #     dists = dists.mean(axis=1)
+        #     probas = np.exp(-dists)
+        #     circles = circles[np.random.rand(circles.shape[0]) < probas]
+
+        # hough consensus using kdtree
+        query_circles = circles.copy()
+        query_circles[:, 2] *= 2
+        kdtree = cKDTree(circles)
+        neighbors = kdtree.query_ball_tree(kdtree, r=search_radius)
+        best_index = neighbors.index(max(neighbors, key=len))
+        best_circle_inds = neighbors[best_index] + [best_index]
+        best_circles = circles[best_circle_inds]
+
+        # best_circle = np.average(best_circles, weights=probas[best_circle_inds], axis=0)
+        best_circle = best_circles.mean(axis=0)
+
+        # # 3d plot points and color by number of neighbors
+        # fig = go.Figure(data=[
+        #     go.Scatter3d(
+        #         x=circles[:, 0],
+        #         y=circles[:, 1],
+        #         z=circles[:, 2],
+        #         mode='markers',
+        #         marker=dict(
+        #             size=2,
+        #             color="black",                # set color to an array/list of desired values
+        #             colorscale='Viridis',   # choose a colorscale
+        #             opacity=0.8
+        #         )
+        #     ),
+        #     go.Scatter3d(
+        #         x=best_circles[:, 0],
+        #         y=best_circles[:, 1],
+        #         z=best_circles[:, 2],
+        #         mode='markers',
+        #         marker=dict(
+        #             size=3,
+        #             color='red',                # set color to an array/list of desired values
+        #             opacity=1
+        #         )
+        #     ),
+        # ])
+        # fig['layout']['showlegend'] = False
+        # fig.show()
+        return cls(center=(best_circle[0], best_circle[1], 0), radius=best_circle[2])
+
+    @classmethod
     def from_cloud_lm(  # NOT TESTED!
         cls,
         initial_circle: "Circle",
@@ -401,6 +518,54 @@ class Circle:
         x_c, y_c, R = -B / (2 * A), -C / (2 * A), 1 / (2 * np.abs(A))
 
         return cls((x_c, y_c, circle_height), R)
+
+    @classmethod
+    def from_3_2d_points(cls, points, method="bisectors"):
+        # from https://qc.edu.hk/math/Advanced%20Level/circle%20given%203%20points.htm
+        if points.shape[0] != 3:
+            assert points.shape[1] == 3, "each batch must contain 3 points"
+        else:
+            assert points.shape[0] == 3, "points must contain 3 points"
+            points = points[None, ...]
+        if method == "bisectors":
+            # intersecting bisectors method
+            p0 = (points[:, 0, :] + points[:, 1, :]) / 2
+            p1 = (points[:, 1, :] + points[:, 2, :]) / 2
+            v0 = points[:, 1, :] - points[:, 0, :]
+            v0 = np.flip(v0, axis=1) * np.array([1, -1])
+            v1 = points[:, 2, :] - points[:, 1, :]
+            v1 = np.flip(v1, axis=1) * np.array([1, -1])
+            alpha = p1[:, 1] - p0[:, 1] + (p0[:, 0] - p1[:, 0]) * v1[:, 1] / v1[:, 0]
+            alpha /= v0[:, 1] - v0[:, 0] * v1[:, 1] / v1[:, 0]
+            x = p0[:, 0] + alpha * v0[:, 0]
+            y = p0[:, 1] + alpha * v0[:, 1]
+            r = np.sqrt((x - points[:, 0, 0]) ** 2 + (y - points[:, 0, 1]) ** 2)
+        elif method == "determinant":
+            # determinant method
+            M = np.zeros((points.shape[0], 3, 4))
+            M[:, 0, 0] = points[:, 0, 0] ** 2 + points[:, 0, 1] ** 2
+            M[:, 0, 1] = points[:, 0, 0]
+            M[:, 0, 2] = points[:, 0, 1]
+            M[:, 0, 3] = 1
+            M[:, 1, 0] = points[:, 1, 0] ** 2 + points[:, 1, 1] ** 2
+            M[:, 1, 1] = points[:, 1, 0]
+            M[:, 1, 2] = points[:, 1, 1]
+            M[:, 1, 3] = 1
+            M[:, 2, 0] = points[:, 2, 0] ** 2 + points[:, 2, 1] ** 2
+            M[:, 2, 1] = points[:, 2, 0]
+            M[:, 2, 2] = points[:, 2, 1]
+            M[:, 2, 3] = 1
+            denom = np.linalg.det(M[:, :, 1:])
+            x = 0.5 * np.linalg.det(M[:, :, [0, 2, 3]]) / denom
+            y = -0.5 * np.linalg.det(M[:, :, [0, 1, 3]]) / denom
+            r = np.sqrt(x**2 + y**2 + np.linalg.det(M[:, :, :3]) / denom)
+        else:
+            raise ValueError(f"method {method} not supported")
+        circles = np.stack([x, y, r], axis=1)
+        if points.shape[0] == 1:
+            return cls((circles[0, 0], circles[0, 1], 0), circles[0, 2])
+        else:
+            return circles
 
     def query_point(self, theta: float):
         pointer = np.array([np.cos(theta), -np.sin(theta), 0])

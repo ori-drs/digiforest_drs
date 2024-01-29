@@ -1,12 +1,13 @@
-from digiforest_analysis.tasks import BaseTask
 from digiforest_analysis.utils import plotting
 from digiforest_analysis.utils.clustering import voronoi
 
 import numpy as np
 import open3d as o3d
 
+from digiforest_analysis.tasks import BaseTask
 
-class TreeSegmentation(BaseTask):
+
+class TreeSegmentationVoronoi(BaseTask):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
@@ -18,6 +19,8 @@ class TreeSegmentation(BaseTask):
         # Colormap parameters
         self._cmap = plotting.color_palette
         self._ncolors = plotting.n_colors
+
+        self._debug_level = kwargs.get("debug_level", 0)
 
     def _process(self, **kwargs):
         """ "
@@ -36,7 +39,7 @@ class TreeSegmentation(BaseTask):
         labels, axes = voronoi(
             cloud,
             cloth=kwargs.get("cloth", None),
-            debug_level=kwargs.get("debug_level", 0),
+            debug_level=self._debug_level,
         )
 
         clusters = []
