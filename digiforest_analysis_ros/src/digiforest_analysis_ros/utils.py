@@ -25,17 +25,6 @@ def pose2T(orientation, position):
     return T
 
 
-def transform_clusters(clusters, T_new2old, time_stamp=None):
-    for i in range(len(clusters)):
-        clusters[i]["cloud"].transform(efficient_inv(T_new2old))
-        clusters[i]["info"]["axis"]["transform"] = (
-            efficient_inv(T_new2old) @ clusters[i]["info"]["axis"]["transform"]
-        )
-        clusters[i]["info"]["sensor_transform"] = T_new2old
-        if time_stamp:
-            clusters[i]["info"]["time_stamp"] = time_stamp
-
-
 def efficient_inv(T):
     assert T.shape == (4, 4), "T must be a 4x4 matrix"
     T_inv = np.eye(4)
@@ -69,14 +58,14 @@ def radius_crop_pc(
     cloud = cloud.transform(efficient_inv(center_pose))
     # Calculate the distance from the sensor
     distances = np.linalg.norm(cloud.point.positions.numpy()[:, :2], axis=1)
-    mask = distances <= radius
-    cloud = cloud.select_by_mask(mask)
+    cloud = cloud.select_by_mask(distances <= radius)
     cloud = cloud.transform(center_pose)
 
     return cloud
 
 
 def clustering_worker_fun(
+    tf_buffer,
     cloud_msg,
     terrain_enabled,
     terrain_smoothing,
@@ -90,6 +79,8 @@ def clustering_worker_fun(
     max_cluster_radius,
     point_fraction,
     debug_level,
+    map_frame_id,
+    odom_frame_id,
 ):
     terrain_fitter = TerrainFitting(
         sloop_smooth=terrain_smoothing,
@@ -116,6 +107,16 @@ def clustering_worker_fun(
     center_pose = path_odom.poses[center_index].pose
     center_stamp = path_odom.poses[center_index].header.stamp
     T_sensor2odom = pose2T(center_pose.orientation, center_pose.position)
+    pose_odom2map = tf_buffer.lookup_transform(
+        map_frame_id,
+        odom_frame_id,
+        rospy.Duration(0),
+        rospy.Duration(1),
+    )
+    T_odom2map = pose2T(
+        pose_odom2map.transform.rotation, pose_odom2map.transform.translation
+    )
+    T_sensor2map = T_odom2map @ T_sensor2odom
 
     timer = Timer()
     with timer("cw"):
@@ -144,9 +145,14 @@ def clustering_worker_fun(
             )
         # convert clusters into stamped sensor frame
         with timer("cw/transform"):
-            transform_clusters(
-                clusters, T_new2old=T_sensor2odom, time_stamp=center_stamp
-            )
+            for i in range(len(clusters)):
+                clusters[i]["cloud"].transform(efficient_inv(T_sensor2odom))
+                clusters[i]["info"]["axis"]["transform"] = (
+                    efficient_inv(T_sensor2odom)
+                    @ clusters[i]["info"]["axis"]["transform"]
+                )
+                clusters[i]["info"]["T_sensor2map"] = T_sensor2map
+                clusters[i]["info"]["time_stamp"] = center_stamp
 
     rospy.loginfo(f"Timing results of clustering:\n{timer}")
 

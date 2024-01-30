@@ -714,7 +714,7 @@ class Tree:
             raise ValueError("No measurements available yet.")
 
         cluster_trafos_odom = [
-            c["info"]["sensor_transform"] @ c["info"]["axis"]["transform"]
+            c["info"]["T_sensor2map"] @ c["info"]["axis"]["transform"]
             for c in self.clusters
         ]
 
@@ -747,8 +747,8 @@ class Tree:
         return np.vstack(
             [
                 cluster["cloud"].point.positions.numpy()
-                @ cluster["info"]["sensor_transform"][:3, :3].T
-                + cluster["info"]["sensor_transform"][:3, 3]
+                @ cluster["info"]["T_sensor2map"][:3, :3].T
+                + cluster["info"]["T_sensor2map"][:3, 3]
                 for cluster in self.clusters
             ]
         )

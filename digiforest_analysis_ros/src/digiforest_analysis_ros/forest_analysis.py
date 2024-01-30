@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # author: Leonard Freissmuth
 
+import colorsys
 from copy import deepcopy
 from functools import partial
 import os
@@ -318,11 +319,15 @@ class ForestAnalysis:
                 f"Published {len(clouds)} colored pointclouds on the topic {self._debug_clusters_topic}"
             )
 
-    def publish_cluster_labels(self, labels: List[str], locations: List[np.ndarray]):
+    def publish_cluster_labels(
+        self, labels: List[str], locations: List[np.ndarray], frame_id=None
+    ):
         marker_array = MarkerArray()
         for i, (label, location) in enumerate(zip(labels, locations)):
             marker = Marker()
-            marker.header.frame_id = self.last_pc_header.frame_id
+            marker.header.frame_id = (
+                frame_id if frame_id else self.last_pc_header.frame_id
+            )
             marker.header.stamp = self.last_pc_header.stamp
             marker.ns = "realtime_trees/markers"
             marker.id = i
@@ -342,7 +347,6 @@ class ForestAnalysis:
             marker.color.b = 1.0
             marker.text = label
             marker_array.markers.append(marker)
-
         self._pub_cluster_labels.publish(marker_array)
 
     def _clustering_worker_finished_callback(
@@ -352,45 +356,101 @@ class ForestAnalysis:
         clusters, terrain = result
         with timer("cwc"):
             with timer("cwc/publishing_clustering"):
+                clouds = [
+                    c["cloud"]
+                    .clone()
+                    .transform(c["info"]["T_sensor2map"])
+                    .point.positions.numpy()
+                    for c in clusters
+                ]
                 self.publish_pointclouds(
                     self._pub_debug_clusters,
-                    clouds=[
-                        c["cloud"]
-                        .clone()
-                        .transform(c["info"]["sensor_transform"])
-                        .point.positions.numpy()
-                        for c in clusters
-                    ],
+                    clouds=clouds,
                     colors=[c["info"]["color"] for c in clusters],
-                    frame_id=self._odom_frame_id,
+                    frame_id=self._map_frame_id,
                 )
             with timer("cwc/tree_manager"):
-                path_odom = np.array(
+                path_odom_pos = np.array(
                     [
+                        [p.pose.position.x, p.pose.position.y, p.pose.position.z]
+                        for p in path_odom.poses
+                    ]
+                )
+                path_odom_ori = [
+                    Rotation.from_quat(
                         [
-                            p.pose.position.x,
-                            p.pose.position.y,
-                            p.pose.position.z,
                             p.pose.orientation.x,
                             p.pose.orientation.y,
                             p.pose.orientation.z,
                             p.pose.orientation.w,
                         ]
-                        for p in path_odom.poses
+                    )
+                    for p in path_odom.poses
+                ]
+                pose_odom2map = self._tf_buffer.lookup_transform(
+                    self._map_frame_id,
+                    self._odom_frame_id,
+                    rospy.Time(0),
+                    rospy.Duration(1),
+                )
+                quat_odom2map = [
+                    pose_odom2map.transform.rotation.x,
+                    pose_odom2map.transform.rotation.y,
+                    pose_odom2map.transform.rotation.z,
+                    pose_odom2map.transform.rotation.w,
+                ]
+                R_odom2map = Rotation.from_quat(quat_odom2map)
+                t_odom2map = np.array(
+                    [
+                        pose_odom2map.transform.translation.x,
+                        pose_odom2map.transform.translation.y,
+                        pose_odom2map.transform.translation.z,
                     ]
                 )
+                R_map2sensor = Rotation.from_matrix(
+                    clusters[0]["info"]["T_sensor2map"][:3, :3].T
+                )
+                t_map2sensor = (
+                    -clusters[0]["info"]["T_sensor2map"][:3, :3].T
+                    @ clusters[0]["info"]["T_sensor2map"][:3, 3]
+                )
+                path_map = np.stack(
+                    [
+                        np.concatenate(
+                            (
+                                R_odom2map.apply(p) + t_odom2map,
+                                (R_odom2map * o).as_quat(),
+                            )
+                        )
+                        for p, o in zip(path_odom_pos, path_odom_ori)
+                    ],
+                    axis=0,
+                )
+                path_sensor = np.stack(
+                    [
+                        np.concatenate(
+                            (
+                                R_map2sensor.apply(p) + t_map2sensor,
+                                (R_map2sensor * Rotation.from_quat(o)).as_quat(),
+                            )
+                        )
+                        for p, o in zip(path_map[:, :3], path_map[:, 3:])
+                    ]
+                )
+
                 with self.tree_manager_lock:
-                    self._tree_manager.add_clusters_with_path(clusters, path_odom)
-                    sensor_transform = clusters[0]["info"]["sensor_transform"]
-                    verts_odom, tris_odom = meshgrid_to_mesh(terrain)
+                    self._tree_manager.add_clusters_with_path(clusters, path_sensor)
+                    verts_odom, tris = meshgrid_to_mesh(terrain)
+                    verts_map = R_odom2map.apply(verts_odom) + t_odom2map
                     self._tree_manager.add_terrain(
-                        verts_odom,
-                        tris_odom,
+                        verts_map,
+                        tris,
                         clusters[0]["info"]["time_stamp"],
-                        sensor_transform,
-                        path_odom,
+                        clusters[0]["info"]["T_sensor2map"],
+                        path_map,
                         self._terrain_cloth_cell_size,
                     )
+
             with timer("cwc/publishing_tree_manager"):
                 self.publish_tree_manager_state()
                 self._tree_manager.write_results(
@@ -413,17 +473,19 @@ class ForestAnalysis:
                             "wb",
                         ) as file:
                             pickle.dump(cluster, file)
+
         rospy.loginfo(f"Finished processing payload cloud {pc_counter}:\n{timer}")
 
-    def payload_with_path_callback(self, cloud_msg: PointCloud2, path_odom: Path):
+    def payload_with_path_callback(self, cloud_odom: PointCloud2, path_odom: Path):
         self.pc_counter += 1
         rospy.loginfo(f"Received payload cloud {self.pc_counter} and path")
-        self.last_pc_header = cloud_msg.header
+        self.last_pc_header = cloud_odom.header
 
         self._clustering_pool.apply_async(
             clustering_worker_fun,
             kwds={
-                "cloud_msg": cloud_msg,
+                "tf_buffer": self._tf_buffer,
+                "cloud_msg": cloud_odom,
                 "path_odom": path_odom,
                 "pose_graph_stamps": self.pose_graph_stamps,
                 "terrain_enabled": self._terrain_enabled,
@@ -436,6 +498,8 @@ class ForestAnalysis:
                 "max_cluster_radius": self._clustering_max_cluster_radius,
                 "point_fraction": self._clustering_distance_calc_point_fraction,
                 "debug_level": self._debug_level,
+                "map_frame_id": self._map_frame_id,
+                "odom_frame_id": self._odom_frame_id,
             },
             callback=partial(
                 self._clustering_worker_finished_callback,
@@ -450,17 +514,13 @@ class ForestAnalysis:
             pose.header.stamp for pose in posegraph_msg.path.poses
         ]
         with self.tree_manager_lock:
-            self._tree_manager.update_poses(
-                posegraph_msg.path.poses,
-                self._tf_buffer,
-                self._map_frame_id,
-                self._odom_frame_id,
-            )
+            self._tree_manager.update_poses(posegraph_msg.path.poses)
 
     def publish_tree_manager_state(self):
         label_texts = []
         label_positions = []
         mesh_messages = MarkerArray()
+        print("Publishing Tree Manager State")
 
         # trees with labels
         tree_clouds = []
@@ -481,32 +541,34 @@ class ForestAnalysis:
             verts, tris = tree.generate_mesh()
             mesh_messages.markers.append(
                 self.genereate_mesh_msg(
-                    verts, tris, id=tree.id, frame_id=self._odom_frame_id
+                    verts, tris, id=tree.id, frame_id=self._map_frame_id
                 )
             )
-            # if len(tree.clusters) > 5:
-            #     # sample random hue and for all clusters random brighntess between 0.5 and 1
-            #     hue = np.random.rand()
-            #     lightness = [
-            #         np.random.rand() * 0.6 + 0.2 for _ in range(len(tree.clusters))
-            #     ]
-            #     tree_colors.extend([colorsys.hls_to_rgb(hue, l, 1.0) for l in lightness])
-            #     # add voxel downsampled pcs to tree_clouds
-            #     tree_clouds.extend(
-            #         [
-            #             cluster["cloud"]
-            #             .clone()
-            #             .transform(cluster["info"]["sensor_transform"])
-            #             .point.positions.numpy()
-            #             for cluster in tree.clusters
-            #         ]
-            #     )
+            if len(tree.clusters) > 5:
+                # sample random hue and for all clusters random brighntess between 0.5 and 1
+                hue = np.random.rand()
+                lightness = [
+                    np.random.rand() * 0.6 + 0.2 for _ in range(len(tree.clusters))
+                ]
+                tree_colors.extend(
+                    [colorsys.hls_to_rgb(hue, l, 1.0) for l in lightness]
+                )
+                # add voxel downsampled pcs to tree_clouds
+                tree_clouds.extend(
+                    [
+                        cluster["cloud"]
+                        .clone()
+                        .transform(cluster["info"]["T_sensor2map"])
+                        .point.positions.numpy()
+                        for cluster in tree.clusters
+                    ]
+                )
 
         self._pub_tree_meshes.publish(mesh_messages)
-        self.publish_cluster_labels(label_texts, label_positions)
+        self.publish_cluster_labels(label_texts, label_positions, self._map_frame_id)
         if len(tree_clouds) > 0:
             self.publish_pointclouds(
-                self._pub_tree_clusters, tree_clouds, tree_colors, self._odom_frame_id
+                self._pub_tree_clusters, tree_clouds, tree_colors, self._map_frame_id
             )
 
         # Terrain
@@ -515,7 +577,7 @@ class ForestAnalysis:
             self.genereate_mesh_msg(
                 verts,
                 tris,
-                frame_id=self._odom_frame_id,
+                frame_id=self._map_frame_id,
                 time_stamp=self.last_pc_header.stamp,
                 color=[0.5, 0.5, 0.5],
                 alpha=1.0,
@@ -684,7 +746,7 @@ class TreeManager:
         self.capture_Ts_with_stamps.append(
             {
                 "stamp": clusters_base[0]["info"]["time_stamp"],
-                "pose": clusters_base[0]["info"]["sensor_transform"],
+                "pose": clusters_base[0]["info"]["T_sensor2map"],
             }
         )
 
@@ -699,7 +761,7 @@ class TreeManager:
             with timer("Finding Correspondences"):
                 num_existing, num_new = 0, 0
                 candidate_transforms_odom = [
-                    c["info"]["sensor_transform"] @ c["info"]["axis"]["transform"]
+                    c["info"]["T_sensor2map"] @ c["info"]["axis"]["transform"]
                     for c in clusters_base
                 ]
                 candidate_centers = [t[:2, 3] for t in candidate_transforms_odom]
@@ -732,7 +794,7 @@ class TreeManager:
     def add_clusters_with_path(
         self,
         clusters_base: List[dict],
-        path_odom: np.ndarray,
+        path_sensor: np.ndarray,
     ):
         """This function checks every cluster and performs the same as add_clusters().
         In addition, it calculates the covered angle and covered distance of the sensor
@@ -742,15 +804,14 @@ class TreeManager:
         Args:
             clusters (List[dict]): List of clusters as returned by
                 TreeSegmentation.process()
-            path (np.ndarray): Nx7 array describing consecutive 7D poses of the sensor
+            path (np.ndarray): Nx3 array describing consecutive 7D poses of the sensor
                 in the same coordinate frame as the clusters.
-                The first three columns are the x, y, z coordinates of the position. The
-                last four columns are the x, y, z, w quaternions describing orientation.
+                The columns are the x, y, z coordinates of the position.
         """
 
         for cluster_base in clusters_base:
             angle_from, angle_to, d_min, d_max = self.calculate_coverage(
-                cluster_base, path_odom
+                cluster_base, path_sensor
             )
             cluster_base["info"]["coverage"] = {
                 "angle_from": angle_from,
@@ -779,21 +840,21 @@ class TreeManager:
                 continue
             else:
                 terrains.append(terrain)
-                sensor_transform = self.capture_Ts_with_stamps[
+                T_sensor2map = self.capture_Ts_with_stamps[
                     pose_graph_stamps.index(terrain["time_stamp"])
                 ]["pose"]
-                sensor_transforms.append(sensor_transform)
+                sensor_transforms.append(T_sensor2map)
 
         # aggregate database entries into lists
-        meshes_odom = [
-            deepcopy(terrain["mesh_base"]).apply_transform(terrain["sensor_transform"])
+        meshes_map = [
+            deepcopy(terrain["mesh_sensor"]).apply_transform(terrain["T_sensor2map"])
             for terrain in terrains
         ]
 
         bboxes = np.asarray(
             [
                 (mesh.vertices.min(axis=0), mesh.vertices.max(axis=0))
-                for mesh in meshes_odom
+                for mesh in meshes_map
             ]
         )
 
@@ -813,22 +874,19 @@ class TreeManager:
         # aggregate all maps into a single tensor of map heights and weights
         heights = np.ones((*query_X.shape, len(self.terrains)))
         weights = np.zeros((*query_X.shape, len(self.terrains)))
-        for i, terrain in enumerate(self.terrains):
-            mesh_odom = deepcopy(terrain["mesh_base"])
+        for i, (terrain, mesh_map) in enumerate(zip(self.terrains, meshes_map)):
             mesh_weights = terrain["vertex_weights"]
-            # convert to odom frame
-            mesh_odom = mesh_odom.apply_transform(terrain["sensor_transform"])
             # querying all rays is not slower than preselecting the rays
             # inside the meshe's bounding box.
             # find indices in triangles where rays hit mesh
-            tri_inds = mesh_odom.ray.intersects_first(query_positions, query_rays)
+            tri_inds = mesh_map.ray.intersects_first(query_positions, query_rays)
             verts_mask = tri_inds != -1
             tri_inds = tri_inds[verts_mask]
             # just take the center of the tri as an approximation
-            intersects = mesh_odom.vertices[mesh_odom.faces[tri_inds]].mean(axis=1)
+            intersects = mesh_map.vertices[mesh_map.faces[tri_inds]].mean(axis=1)
             heights[verts_mask.reshape(query_X.shape), i] = intersects[:, 2]
             weights[verts_mask.reshape(query_X.shape), i] = mesh_weights[
-                mesh_odom.faces[tri_inds]
+                mesh_map.faces[tri_inds]
             ].mean(axis=1)
         heights = np.sum(heights * weights, axis=2) / weights.sum(axis=2)
 
@@ -863,11 +921,11 @@ class TreeManager:
 
     def add_terrain(
         self,
-        terrain_mesh_odom_verts: np.ndarray,
-        terrain_mesh_odom_tris: np.ndarray,
+        terrain_mesh_verts_map: np.ndarray,
+        terrain_mesh_tris: np.ndarray,
         time_stamp: rospy.Time,
-        sensor_transform: np.ndarray,
-        path_odom: np.ndarray,
+        T_sensor2map: np.ndarray,
+        path_map: np.ndarray,
         cell_size: float,
     ):
         """Adds the local terrain to the terrain accumulator. Also updates the
@@ -941,30 +999,26 @@ class TreeManager:
 
             return weights
 
-        weights = measurement_likelihood(terrain_mesh_odom_verts, path_odom)
-        terrain_mesh_base_verts = apply_transform(
-            terrain_mesh_odom_verts,
-            sensor_transform[:3, 3],
-            sensor_transform[:3, :3],
+        weights = measurement_likelihood(terrain_mesh_verts_map, path_map)
+        terrain_mesh_sensor_verts = apply_transform(
+            terrain_mesh_verts_map,
+            T_sensor2map[:3, 3],
+            T_sensor2map[:3, :3],
             inverse=True,
         )
-        terrain_mesh_base_tris = terrain_mesh_odom_tris.copy()
 
-        terrain_mesh_base = trimesh.Trimesh(
-            terrain_mesh_base_verts.astype(np.float64),
-            terrain_mesh_base_tris.astype(np.int64),
+        terrain_mesh_sensor = trimesh.Trimesh(
+            terrain_mesh_sensor_verts.astype(np.float64),
+            terrain_mesh_tris.astype(np.int64),
             use_embree=self.use_embree,
         )
 
         retval = {
-            "mesh_base": terrain_mesh_base,
-            "mesh_odom": trimesh.Trimesh(
-                terrain_mesh_odom_verts, terrain_mesh_odom_tris
-            ),
+            "mesh_sensor": terrain_mesh_sensor,
             "time_stamp": time_stamp,
-            "sensor_transform": sensor_transform,
+            "T_sensor2map": T_sensor2map,
             "vertex_weights": weights,
-            "path": path_odom,
+            "path": path_map,
             "cell_size": cell_size,
         }
 
@@ -975,13 +1029,7 @@ class TreeManager:
             pickle.dump(retval, file)
         self.terrains.append(retval)
 
-    def update_poses(
-        self,
-        new_posegraph: List[PoseStamped],
-        tf_buffer: tf2_ros.Buffer,
-        map_frame_id: str = "map",
-        odom_frame_id: str = "odom_vilens",
-    ):
+    def update_poses(self, new_posegraph: List[PoseStamped]):
         """detects changes in the posegraph and updates the coordinate systems of all
         clusters in all trees.
 
@@ -996,28 +1044,19 @@ class TreeManager:
             try:
                 i_new = new_stamps.index(T_with_stamp["stamp"])
                 new_stamped_pose_map = new_posegraph[i_new]
-                map2odom = tf_buffer.lookup_transform(
-                    target_frame=odom_frame_id,
-                    source_frame=map_frame_id,
-                    time=new_posegraph[-1].header.stamp,
-                    timeout=rospy.Duration(0.1),
-                )
-                T_map2odom = pose2T(
-                    map2odom.transform.rotation,
-                    map2odom.transform.translation,
-                )
-                new_T_odom = T_map2odom @ pose2T(
+                new_T_map = pose2T(
                     new_stamped_pose_map.pose.orientation,
                     new_stamped_pose_map.pose.position,
                 )
-                if not np.allclose(new_T_odom, T_with_stamp["pose"]):
+
+                if not np.allclose(new_T_map, T_with_stamp["pose"]):
                     changed_poses.append(
                         {
                             "stamp": T_with_stamp["stamp"],
-                            "pose": new_T_odom,
+                            "pose": new_T_map,
                         }
                     )
-                    self.capture_Ts_with_stamps[i]["pose"] = new_T_odom
+                    self.capture_Ts_with_stamps[i]["pose"] = new_T_map
             except ValueError:
                 print("Timestamp not found")
                 print(self.capture_Ts_with_stamps)
@@ -1027,10 +1066,12 @@ class TreeManager:
             for tree in self.trees:
                 for cluster in tree.clusters:
                     if changed_pose["stamp"] == cluster["info"]["time_stamp"]:
-                        cluster["info"]["sensor_transform"] = changed_pose["pose"]
+                        cluster["info"]["T_sensor2map"] = changed_pose["pose"]
 
     def calculate_coverage(
-        self, cluster_base: dict, path_odom: np.ndarray
+        self,
+        cluster_sensor: dict,
+        path_sensor: np.ndarray,
     ) -> Tuple[float]:
         """Calculates the covered angle of the sensor to the tree axis for a given
         cluster. The covered angle is given by two values defining the global extent
@@ -1056,13 +1097,9 @@ class TreeManager:
         min_distance = np.inf
         max_distance = -np.inf
         angles = []
-        for pose in path_odom:
+        for pose in path_sensor:
             # calculate connecting vector between sensor pose and tree axis center
-            cluster_transform_odom = (
-                cluster_base["info"]["sensor_transform"]
-                @ cluster_base["info"]["axis"]["transform"]
-            )
-            ray_vector = pose[:2] - cluster_transform_odom[:2, 3]
+            ray_vector = pose[:2] - cluster_sensor["info"]["axis"]["transform"][:2, 3]
             ray_length = np.linalg.norm(ray_vector)
 
             # calculate angle of ray vector wrt. global x-axis
@@ -1202,28 +1239,3 @@ class TreeManager:
             os.path.join(path, "csv", file_name_csv), float_format="%.3f", index=False
         )
         df.to_excel(os.path.join(path, "xlsx", file_name_xlsx), index=False)
-
-
-if __name__ == "__main__":
-    tm = TreeManager()
-    for f in os.listdir("/home/ori/git/digiforest_drs/terrains"):
-        if ".pkl" not in f:
-            continue
-        with open(os.path.join("/home/ori/git/digiforest_drs/terrains", f), "rb") as f:
-            mesh_dict = pickle.load(f)
-
-        tm.add_terrain(
-            mesh_dict["mesh_odom"].vertices,
-            mesh_dict["mesh_odom"].faces,
-            mesh_dict["time_stamp"],
-            mesh_dict["sensor_transform"],
-            mesh_dict["path"],
-            mesh_dict["cell_size"],
-        )
-        tm.capture_Ts_with_stamps.append(
-            {"stamp": mesh_dict["time_stamp"], "pose": mesh_dict["sensor_transform"]}
-        )
-
-    terrain = tm.get_terrain()
-    # terrain = trimesh.Trimesh(terrain[0], terrain[1])
-    # terrain.show()
