@@ -13,6 +13,8 @@ from digiforest_analysis.utils.timing import Timer
 from digiforest_analysis.utils.meshing import meshgrid_to_mesh
 
 timer = Timer()
+current_point_cloud = 0
+current_view = None
 
 
 def cluster(cloud, method="dbscan_open3d", **kwargs):
@@ -228,34 +230,61 @@ def voronoi(  # noqa: C901
 
     labels = -np.ones(cloud.point.positions.shape[0], dtype=np.int32)
 
-    if debug_level > 1:
-        if cloth is None:
-            print("VIZ: Input Cloud")
-            o3d.visualization.draw_geometries([cloud.to_legacy()])
-        else:
-            print("VIZ: Input Cloud with Cloth")
-            verts, tris = meshgrid_to_mesh(cloth)
-            verts_vec = o3d.utility.Vector3dVector(verts)
-            tris_vec = o3d.utility.Vector3iVector(np.flip(tris, axis=1))
-            terrain_mesh = o3d.geometry.TriangleMesh(verts_vec, tris_vec)
-            o3d.visualization.draw_geometries([cloud.to_legacy(), terrain_mesh])
-
     # 1. Normalize heights
     with timer("normalizing heights"):
         if cloth is not None:
             height_interpolator = RegularGridInterpolator(
-                points=(cloth[:, 0, 1], cloth[0, :, 0]),
+                points=(cloth[:, 0, 0], cloth[0, :, 1]),
                 values=cloth[:, :, 2],
                 method="linear",
                 bounds_error=False,
                 fill_value=0.0,
             )
             heights = height_interpolator(cloud.point.positions.numpy()[:, :2])
+            index = (12, 12)
+            p1 = np.array([cloth[index[0], 0, 0], cloth[0, index[1], 1]])
+            v_true = cloth[index[0], index[1], 2]
+            v_interp = height_interpolator(p1)
+            print(v_true, v_interp)
+            cloud_orig = cloud.clone()
             cloud.point.positions[:, 2] -= heights.astype(np.float32)
 
     if debug_level > 1:
         print("VIZ: Height-normalized Cloud")
-        o3d.visualization.draw_geometries([cloud.to_legacy()])
+
+        def toggle_point_cloud(vis):
+            global current_point_cloud
+            current_view = vis.get_view_control().convert_to_pinhole_camera_parameters()
+            verts, tris = meshgrid_to_mesh(cloth)
+            verts_vec = o3d.utility.Vector3dVector(verts)
+            tris_vec = o3d.utility.Vector3iVector(
+                np.concatenate((tris, np.flip(tris, axis=1)), axis=0)
+            )
+            terrain_mesh = o3d.geometry.TriangleMesh(verts_vec, tris_vec)
+            if current_point_cloud == 1:
+                vis.clear_geometries()
+                vis.add_geometry(terrain_mesh)
+                vis.add_geometry(cloud_orig.to_legacy())
+                current_point_cloud = 2
+                print("Showing Unnormalized cloud")
+            else:
+                vis.clear_geometries()
+                vis.add_geometry(cloud.to_legacy())
+                print(cloth[:, :, 2].min(), cloth[:, :, 2].max())
+                print("Showing Normalized cloud")
+                current_point_cloud = 1
+            vis.get_view_control().convert_from_pinhole_camera_parameters(
+                current_view, True
+            )
+
+        global current_point_cloud
+        current_point_cloud = 1
+        visualizer = o3d.visualization.VisualizerWithKeyCallback()
+        visualizer.create_window()
+        visualizer.add_geometry(cloud.to_legacy())
+        visualizer.register_key_callback(ord("T"), toggle_point_cloud)
+        visualizer.run()
+        visualizer.destroy_window()
 
     # 2. Crop point cloud between cluster_strip_min and cluster_strip_max
     with timer("cropping"):

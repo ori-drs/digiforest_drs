@@ -39,7 +39,7 @@ timer = Timer()
 # ignore divide by zero warnings, code actively works with nans
 np.seterr(divide="ignore", invalid="ignore")
 
-# cd catkin_ws/src/vilens_config/vc_stein_am_rhein/config/procman && rosrun procman_ros sheriff -l frontier.pmd
+# cd ~/catkin_ws/src/vilens_config/vc_stein_am_rhein/config/procman && rosrun procman_ros sheriff -l frontier.pmd
 # cd ~/logs/logs_evo_finland/exp01 && rosbag play frontier_2023-05-01-14-* --clock --pause --topics /hesai/pandar /alphasense_driver_ros/imu  -r 1
 
 

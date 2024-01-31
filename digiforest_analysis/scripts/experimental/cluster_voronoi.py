@@ -60,7 +60,7 @@ def plot_mesh(vertices, triangles, points):
 
 if __name__ == "__main__":
     # pcd_file = "/home/ori/logs/logs_evo_finland/exp16/combined_cloud.pcd"
-    pcd_file = "/home/ori/git/digiforest_drs/payload_clouds/pc016.pcd"
+    pcd_file = "/home/ori/git/digiforest_drs/payload_clouds/pc021.pcd"
     # pcd_file = "/home/ori/logs/logs_evo_finland/exp01/2023-05-01-14-01-05-exp01/payload_clouds/cloud_1682946124_761436000.pcd"
     cloud, header = load(pcd_file, binary=True)
     if "VIEWPOINT" in header:
@@ -78,7 +78,7 @@ if __name__ == "__main__":
     tm = trimesh.Trimesh(vertices=verts, faces=tris)
 
     # SEGMENT TREES
-    tree_seg = TreeSegmentationVoronoi(debug_level=1, clustering_method="voronoi")
+    tree_seg = TreeSegmentationVoronoi(debug_level=2, clustering_method="voronoi")
     clusters = tree_seg.process(
         cloud=cloud,
         cloth=terrain,
