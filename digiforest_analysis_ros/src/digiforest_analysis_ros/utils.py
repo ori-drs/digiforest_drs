@@ -7,6 +7,7 @@ import rospy
 from sensor_msgs.msg import PointCloud2
 from digiforest_analysis.tasks.terrain_fitting import TerrainFitting
 from digiforest_analysis.tasks.tree_segmentation_voronoi import TreeSegmentationVoronoi
+from digiforest_analysis.utils.matrix_calc import efficient_inv
 
 
 def pose2T(orientation, position):
@@ -23,14 +24,6 @@ def pose2T(orientation, position):
     ).as_matrix()
     T[:3, 3] = np.array([position.x, position.y, position.z])
     return T
-
-
-def efficient_inv(T):
-    assert T.shape == (4, 4), "T must be a 4x4 matrix"
-    T_inv = np.eye(4)
-    T_inv[:3, :3] = T[:3, :3].T
-    T_inv[:3, 3] = -T[:3, :3].T @ T[:3, 3]
-    return T_inv
 
 
 def pc2_to_o3d(cloud: PointCloud2):
