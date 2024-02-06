@@ -549,24 +549,22 @@ class ForestAnalysis:
 
             # sample random hue and for all clusters random brighntess between 0.5 and 1
             hue = np.random.rand()
-            # lightness = [
-            #     np.random.rand() * 0.6 + 0.2 for _ in range(len(tree.clusters))
-            # ]
-            # tree_colors.extend(
-            #     [colorsys.hls_to_rgb(hue, l, 1.0) for l in lightness]
-            # )
-            # # add voxel downsampled pcs to tree_clouds
-            # tree_clouds.extend(
-            #     [
-            #         cluster["cloud"]
-            #         .clone()
-            #         .transform(cluster["info"]["T_sensor2map"])
-            #         .point.positions.numpy()
-            #         for cluster in tree.clusters
-            #     ]
-            # )
-            tree_clouds.append(tree.points)
-            tree_colors.append(colorsys.hls_to_rgb(hue, 0.6, 1.0))
+            lightness = [
+                np.random.rand() * 0.8 + 0.1 for _ in range(len(tree.clusters))
+            ]
+            tree_colors.extend([colorsys.hls_to_rgb(hue, l, 1.0) for l in lightness])
+            # add voxel downsampled pcs to tree_clouds
+            tree_clouds.extend(
+                [
+                    cluster["cloud"]
+                    .clone()
+                    .transform(cluster["info"]["T_sensor2map"])
+                    .point.positions.numpy()
+                    for cluster in tree.clusters
+                ]
+            )
+            # tree_clouds.append(tree.points)
+            # tree_colors.append(colorsys.hls_to_rgb(hue, 0.6, 1.0))
 
         self._pub_tree_meshes.publish(mesh_messages)
         self.publish_cluster_labels(label_texts, label_positions, self._map_frame_id)
@@ -677,11 +675,11 @@ class TreeManager:
         self.num_trees += 1
 
     def distance_line_to_line(
-        self, line_1: dict, line_2: dict, margin: float = 0
+        self, line_1: dict, line_2: dict, clip_heights: List[float] = None
     ) -> float:
         """Calculates the minum distance between two axes. If the keyword "axis_length"
         is present in the dicts, the closest points are bounded to be between the basis
-        poit of the axis and not further away from the basis point in the z direction
+        point of the axis and not further away from the basis point in the z direction
         of the given rot_mat than the axis_length. Otherwise, the closest points can be
         anywhere on the axis.
         If the key "axis_length" is not present in the dicts, the distance is not bound
@@ -692,23 +690,21 @@ class TreeManager:
                 "axis_length" describing the first axis.
             line2 (dict): Dict with the keys "transform" and optionally
                 "axis_length" describing the second axis.
-            margin (float, optional): Margin in m added to the axis length on both
-                sides. This increases the length so axes at different heights can be
-                matched. Defaults to 0.
+            clip_heights (List[float], optional): If present, the z component of the closest points are
+                bounded to be between global these heights in the frame of the axes.
+                Defaults to None.
 
         Returns:
             float: minimum distance between axes
         """
         axis_pnt_1 = line_1["transform"][:3, 3]
         axis_pnt_2 = line_2["transform"][:3, 3]
-        axis_pnt_1 -= margin * line_1["transform"][:3, 2]
-        axis_pnt_2 -= margin * line_2["transform"][:3, 2]
         axis_dir_1 = line_1["transform"][:3, 2]
         axis_dir_2 = line_2["transform"][:3, 2]
         normal = np.cross(axis_dir_1, axis_dir_2)
         normal_length = np.linalg.norm(normal)
         if np.isclose(normal_length, 0.0):
-            meetin_point_1 = axis_pnt_1
+            meeting_point_1 = axis_pnt_1
             # Part of Gram Schmidt
             meeting_point_2 = axis_pnt_1 - axis_dir_1 * (
                 (axis_pnt_2 - axis_pnt_1) @ axis_dir_1
@@ -722,25 +718,28 @@ class TreeManager:
             s = w_normal @ (axis_pnt_2 - axis_pnt_1) / (w_normal @ axis_dir_1)
             t = v_normal @ (axis_pnt_1 - axis_pnt_2) / (v_normal @ axis_dir_2)
 
-            meetin_point_1 = axis_pnt_1 + s * axis_dir_1
+            meeting_point_1 = axis_pnt_1 + s * axis_dir_1
             meeting_point_2 = axis_pnt_2 + t * axis_dir_2
 
-        if "axis_length" in line_1.keys() and "axis_length" in line_2.keys():
-            axis_len_1 = line_1["axis_length"] + 2 * margin
-            axis_len_2 = line_2["axis_length"] + 2 * margin
-            pos_1_normalized = (meetin_point_1 - axis_pnt_1) @ axis_dir_1 / axis_len_1
-            pos_2_normalized = (meeting_point_2 - axis_pnt_2) @ axis_dir_2 / axis_len_2
+        if clip_heights is not None:
+            if meeting_point_1[2] < clip_heights[0]:
+                meeting_point_1 -= (
+                    axis_dir_1 * (meeting_point_1[2] - clip_heights[0]) / axis_dir_1[2]
+                )
+            if meeting_point_1[2] > clip_heights[1]:
+                meeting_point_1 -= (
+                    axis_dir_1 * (meeting_point_1[2] - clip_heights[1]) / axis_dir_1[2]
+                )
+            if meeting_point_2[2] < clip_heights[0]:
+                meeting_point_2 -= (
+                    axis_dir_2 * (meeting_point_2[2] - clip_heights[0]) / axis_dir_2[2]
+                )
+            if meeting_point_2[2] > clip_heights[1]:
+                meeting_point_2 -= (
+                    axis_dir_2 * (meeting_point_2[2] - clip_heights[1]) / axis_dir_2[2]
+                )
 
-            if pos_1_normalized < 0:
-                meetin_point_1 = axis_pnt_1
-            if pos_1_normalized > 1:
-                meetin_point_1 = axis_pnt_1 + axis_dir_1 * axis_len_1
-            if pos_2_normalized < 0:
-                meeting_point_2 = axis_pnt_2
-            if pos_2_normalized > 1:
-                meeting_point_2 = axis_pnt_2 + axis_dir_2 * axis_len_2
-
-        return np.linalg.norm(meetin_point_1 - meeting_point_2)
+        return np.linalg.norm(meeting_point_1 - meeting_point_2)
 
     def add_clusters(self, clusters_base: List[dict]):
         """This function checks every cluster (in BASE FRAME). If a tree close to the
@@ -781,12 +780,10 @@ class TreeManager:
                     )
                     # transform candidate axis to odom frame
                     candidate_axis["transform"] = candidate_transforms_odom[i_candidate]
-                    # candidate_axis["axis_length"] = axis_length
                     existing_axis = self.trees[i_existing].axis
-                    # existing_axis["axis_length"] = axis_length
 
                     distance = self.distance_line_to_line(
-                        candidate_axis, existing_axis, margin=5
+                        candidate_axis, existing_axis, clip_heights=[0, 10]
                     )
                     if distance < self.distance_threshold:
                         self.trees[i_existing].add_cluster(clusters_base[i_candidate])
@@ -907,7 +904,7 @@ class TreeManager:
         # remove verts with nan
         nan_mask = np.isnan(verts[:, 2])
         # remove verts where there are no maps contributing strongly
-        weights_mask = weights.max(axis=2) < 0.1 * (
+        weights_mask = weights.max(axis=2) < 0.2 * (
             1 - self.terrain_confidence_sensor_weight
         )
 
@@ -1195,7 +1192,11 @@ class TreeManager:
                 continue
 
             rospy.loginfo(f"Reconstructing tree {tree.id}")
-            reco_happened |= tree.reconstruct()
+            reco_sucess = tree.reconstruct2()
+            if reco_sucess:
+                tree.num_clusters_after_last_reco = len(tree.clusters)
+                tree.cosys_changed_after_last_reco = False
+            reco_happened |= reco_sucess
 
         return reco_happened
 
