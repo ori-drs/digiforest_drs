@@ -1,10 +1,9 @@
+from colorsys import hls_to_rgb
 from functools import partial
 from multiprocessing import Pool
 import multiprocessing
-import time
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
-from sklearn.decomposition import PCA
 import open3d as o3d
 from scipy.spatial import cKDTree
 
@@ -215,20 +214,19 @@ def pnts_to_axes_sq_dist(
 def voronoi(  # noqa: C901
     cloud,
     cloth: np.ndarray = None,
-    hough_filter_radius: float = 0.1,
-    crop_lower_bound: float = 5.0,
-    crop_upper_bound: float = 8.0,
+    crop_bounds: list = [[0.5, 1.5], [2, 3], [4, 5]],
     max_cluster_radius: float = np.inf,
     n_threads: int = 1,
     point_fraction: float = 0.1,
     debug_level: int = 0,
     cluster_2d: bool = False,
+    **kwargs,
 ):
     if cluster_2d:
         # TODO: implement 2D clustering
         raise NotImplementedError("2D clustering not implemented for voronoi")
 
-    labels = -np.ones(cloud.point.positions.shape[0], dtype=np.int32)
+    final_labels = -np.ones(cloud.point.positions.shape[0], dtype=np.int32)
 
     # 1. Normalize heights
     with timer("normalizing heights"):
@@ -270,7 +268,6 @@ def voronoi(  # noqa: C901
             else:
                 vis.clear_geometries()
                 vis.add_geometry(cloud.to_legacy())
-                print(cloth[:, :, 2].min(), cloth[:, :, 2].max())
                 print("Showing Normalized cloud")
                 current_point_cloud = 1
             vis.get_view_control().convert_from_pinhole_camera_parameters(
@@ -289,167 +286,236 @@ def voronoi(  # noqa: C901
     # 2. Crop point cloud between cluster_strip_min and cluster_strip_max
     with timer("cropping"):
         points_numpy = cloud.point.positions.numpy()
-        cluster_strip_mask = np.logical_and(
-            points_numpy[:, 2] > crop_lower_bound, points_numpy[:, 2] < crop_upper_bound
-        )
-        cluster_strip = cloud.select_by_mask(cluster_strip_mask.astype(bool))
-        if cloth is not None:
-            cloud.point.positions[:, 2] += heights.astype(np.float32)
+        crops = []
+        for bounds in crop_bounds:
+            mask = np.logical_and(
+                points_numpy[:, 2] > bounds[0], points_numpy[:, 2] < bounds[1]
+            )
+            crop = cloud.select_by_mask(mask.astype(bool))
+            crops.append(crop)
 
     if debug_level > 1:
         print("VIZ: Cropped cloud for clustering")
-        o3d.visualization.draw_geometries([cluster_strip.to_legacy()])
+        o3d.visualization.draw_geometries([c.to_legacy() for c in crops])
 
     # 3. Perform db scan clustering after removing outliers
     with timer("dbscan clustering of crops"):
-        _, ind = cluster_strip.to_legacy().remove_statistical_outlier(
-            nb_neighbors=20, std_ratio=2.0
-        )
+        crop_labels = []
+        for i in range(len(crops)):
+            crop = crops[i]
+            _, ind = crop.to_legacy().remove_statistical_outlier(
+                nb_neighbors=20, std_ratio=2.0
+            )
+            crops[i] = crop.select_by_index(ind)
+            crop_labels.append(
+                crops[i]
+                .cluster_dbscan(eps=0.7, min_points=20, print_progress=False)
+                .numpy()
+            )
 
-        cluster_strip = cluster_strip.select_by_index(ind)
-        labels_pre = cluster_strip.cluster_dbscan(
-            eps=0.7, min_points=20, print_progress=False
-        ).numpy()
-
-    if debug_level > 1:
-        print("VIZ: Clusters of DBSCAN Clustering")
-        max_label = np.max(labels_pre)
-        dbscan_clusters = []
-        for i in range(max_label):
-            cluster_points = cluster_strip.select_by_mask(labels_pre == i)
-            cluster_points.paint_uniform_color(np.random.rand(3))
-            dbscan_clusters.append(cluster_points.to_legacy())
-        o3d.visualization.draw_geometries(dbscan_clusters)
+    # if debug_level > 1:
+    #     print("VIZ: DBSCAN Clustering")
+    #     clusters = []
+    #     for c, l in zip(crops, crop_labels):
+    #         max_label = np.max(l)
+    #         for i in range(max_label):
+    #             cluster_points = c.select_by_mask(l == i)
+    #             cluster_points.paint_uniform_color(np.random.rand(3))
+    #             clusters.append(cluster_points.to_legacy())
+    #     o3d.visualization.draw_geometries(clusters)
 
     # 4. Clean up non-stem points using hough transform
-    hough_times = []
     with timer("hough"):
-        max_label = np.max(labels_pre)
         axes = []
-        for i in range(max_label):
-            cluster_points = cluster_strip.select_by_mask(labels_pre == i)
-            cluster_points = cluster_points.point.positions.numpy()
-            # 4.1. Remove clusters with fewer than 100 points
-            with timer("hough->cluster size check"):
-                if cluster_points.shape[0] < 100:
+        for c, label, bounds in zip(crops, crop_labels, crop_bounds):
+            max_label = np.max(label)
+            for i_label in range(max_label):
+                cluster_points = c.select_by_mask(label == i_label)
+                cluster_points = cluster_points.point.positions.numpy()
+                if cluster_points.shape[0] < 50:
                     if debug_level > 0:
-                        print("Too few points")
+                        print(
+                            f"Cluster {i_label} has only {cluster_points.shape[0]} points. Skipping"
+                        )
                     continue
 
-            # 4.2. remove clsters not extending between cluster_strip_min and cluster_strip_max
-            with timer("hough->extension check"):
+                # Remove clusters not extending between bounds
                 if (
-                    np.min(cluster_points[:, 2]) > 1.05 * crop_lower_bound
-                    or np.max(cluster_points[:, 2]) < 0.95 * crop_upper_bound
+                    np.min(cluster_points[:, 2]) > 1.05 * bounds[0]
+                    or np.max(cluster_points[:, 2]) < 0.95 * bounds[1]
                 ):
                     if debug_level > 0:
                         print(
-                            "Cluster not extending between cluster_strip_min and cluster_strip_max"
+                            f"Cluster {i_label} does not extend between bounds. Skipping"
                         )
                     continue
-            # 4.2. Find circles in projection of cloud onto x-y plane
-            TIME = time.perf_counter_ns()
-
-            with timer("hough->hough circle"):
-                # slice crop at middle
-                middle = (crop_lower_bound + crop_upper_bound) / 2
-                slice_height = crop_upper_bound - crop_lower_bound  # m
-                slice = cluster_points[
+                # Find circles in slice of crop at middle
+                slice_height = 0.2  # m
+                slice_lower = cluster_points[
                     np.logical_and(
-                        cluster_points[:, 2] > middle - slice_height / 2,
-                        cluster_points[:, 2] < middle + slice_height / 2,
+                        cluster_points[:, 2] > bounds[0],
+                        cluster_points[:, 2] < bounds[0] + slice_height,
                     )
                 ]
-                circ, _, votes, _ = Circle.from_cloud_hough(
-                    points=slice,
+                slice_upper = cluster_points[
+                    np.logical_and(
+                        cluster_points[:, 2] < bounds[1],
+                        cluster_points[:, 2] > bounds[1] - slice_height,
+                    )
+                ]
+                hough_kwargs = dict(
                     grid_res=0.02,
                     min_radius=0.05,
                     max_radius=0.5,
                     return_pixels_and_votes=True,
                 )
-                if votes is None:
-                    if debug_level > 0:
-                        print("No votes")
-                    continue
+                # circ_lower, _, votes_lower, _ = Circle.from_cloud_hough(
+                #     points=slice_lower, **hough_kwargs, circle_height=bounds[0]
+                # )
+                # circ_upper, _, votes_upper, _ = Circle.from_cloud_hough(
+                #     points=slice_upper, **hough_kwargs, circle_height=bounds[1]
+                # )
 
-                if votes.max() < 0.1:
+                # if votes_lower is None or votes_upper is None:
+                #     if debug_level > 0:
+                #         print(f"No votes for cluster {i_label}. Skipping")
+                #     continue
+
+                # if votes_lower.max() < 0.1 or votes_upper.max() < 0.1:
+                #     if debug_level > 0:
+                #         print(f"Maximum vote for cluster {i_label} is too low. Skipping")
+                #     continue
+
+                circ_lower = Circle.from_cloud_ransahc(
+                    points=slice_lower,
+                    **hough_kwargs,
+                    circle_height=bounds[0],
+                    max_points=50,
+                )
+                circ_upper = Circle.from_cloud_ransahc(
+                    points=slice_upper,
+                    **hough_kwargs,
+                    circle_height=bounds[1],
+                    max_points=50,
+                )
+                if circ_lower is None or circ_upper is None:
                     if debug_level > 0:
-                        print("max_vote < 0.1")
+                        print(f"No votes for cluster {i_label}. Skipping")
                     continue
 
                 if debug_level > 0:
-                    print(
-                        f"Center coordinates of hough circle: ({circ.x}, {circ.y}), Radius: {circ.radius}, Maximum vote: {votes.max()}"
-                    )
-            hough_times.append(time.perf_counter_ns() - TIME)
+                    print("found two hough circles")
 
-            # 4.3. Remove points that are not close to the circle
-            with timer("hough->filter"):
-                dist = circ.get_distance(cluster_points)
-                cluster_points = cluster_points[dist < hough_filter_radius]
-                if cluster_points.shape[0] < 10:
+                cylinder_radius = (circ_lower.radius + circ_upper.radius) / 2
+                T = np.eye(4)
+                tree_axis = circ_upper.center - circ_lower.center
+                tree_axis /= np.linalg.norm(tree_axis)
+
+                # large trees are expected to be upright!
+                if cylinder_radius > 0.8 * hough_kwargs["max_radius"]:
+                    max_angle = 10
+                else:
+                    max_angle = 20
+                if np.rad2deg(np.arccos(tree_axis[2])) > max_angle:
                     if debug_level > 0:
-                        print("Too few points after filtering")
+                        print(f"Cluster {i_label} is not vertical enough. Skipping")
                     continue
 
-            # 5. Fit tree axes to clusters using PCA
-            with timer("hough->PCA fitting"):
-                pca = PCA(n_components=3)
-                pca.fit(cluster_points)
-                rot_mat = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]]) @ pca.components_
-                if rot_mat[2, 2] < 0:
-                    rot_mat[:, 1:] *= -1  # make sure the z component is positive
-                rot_mat = rot_mat.T
-
-            # convert cluster_points into open3d point cloud and give a random color
-            with timer("hough->points to open3d"):
-                cluster_points = o3d.geometry.PointCloud(
-                    o3d.utility.Vector3dVector(cluster_points)
+                # Compute Score of circle fit: points insde / points up to r away from circle
+                dists = (
+                    pnts_to_axes_sq_dist(
+                        cluster_points,
+                        np.concatenate((tree_axis, circ_lower.center))[None, :],
+                        apply_sqrt=True,
+                    )
+                    - cylinder_radius
                 )
-                cluster_points.paint_uniform_color(np.random.rand(3))
-                T = np.eye(4)
-                T[:3, :3] = rot_mat
-                T[:3, 3] = np.array([circ.x, circ.y, crop_lower_bound])
+                score = (np.abs(dists) < 0.1 * cylinder_radius).sum() / (
+                    dists < 0.1 * cylinder_radius
+                ).sum()
+
+                if score < 0.25:
+                    if debug_level > 0:
+                        print(f"Cluster {i_label} has a bad score ({score}). Skipping")
+                    continue
+
+                axis_normal = np.array([tree_axis[1], -tree_axis[0], 0])
+                axis_normal /= np.linalg.norm(axis_normal)
+                T[:3, :3] = np.stack(
+                    (axis_normal, np.cross(tree_axis, axis_normal), tree_axis), axis=1
+                )
+                T[:3, 3] = np.array([circ_lower.x, circ_lower.y, bounds[0]])
                 axis_dict = {
                     "transform": T,
-                    "radius": circ.radius,
+                    "radius": cylinder_radius,
+                    "height": bounds[1] - bounds[0],
+                    "score": score,
                 }
-                if debug_level > 1:
-                    axis_dict["cloud"] = o3d.t.geometry.PointCloud.from_legacy(
-                        cluster_points
-                    )
                 axes.append(axis_dict)
 
-    if debug_level > 0:
-        print(
-            "Hough times mean:",
-            np.mean(hough_times) * 1e-6,
-            "sum:",
-            np.sum(hough_times) * 1e-6,
-        )
+    # Do Non-maximum suppression
+    with timer("non-maximum suppression"):
+        nms_radius = 1.0
+        kdtree = cKDTree(np.array([a["transform"][:2, 3] for a in axes]))
+        # find all clusters of radius nms_radius
+        indices = kdtree.query_ball_tree(kdtree, nms_radius)
+        if max(len(i) for i in indices) > len(crops):
+            print("WARNING: NMS radius too large. Some clusters are over-suppressed")
+
+        unique_sets = set([tuple(sorted(i)) for i in indices])
+        nms_result = [max(us, key=lambda i: axes[i]["score"]) for us in unique_sets]
+        axes_nms = [axes[i] for i in nms_result]
 
     if debug_level > 1:
-        print("VIZ: Fitted Axes")
+        print("VIZ: DBSCAN Clustering and Fitted Axes")
+        dbscan_clusters = []
+        for c, label in zip(crops, crop_labels):
+            max_label = np.max(label)
+            for i in range(max_label):
+                cluster_points = c.select_by_mask(label == i)
+                cluster_points.paint_uniform_color(np.random.rand(3))
+                dbscan_clusters.append(cluster_points.to_legacy())
+
         cylinders = []
+        cylinders_nms = []
         for axis in axes:
-            cylinder_height = crop_upper_bound - crop_lower_bound
             cylinder = o3d.geometry.TriangleMesh.create_cylinder(
-                radius=axis["radius"], height=cylinder_height
+                radius=axis["radius"], height=axis["height"]
             )
             # shift up or down depending on third component of pca. Thus the
             # cylinder allways covers the pc
             cylinder.vertices = o3d.utility.Vector3dVector(
-                np.array(cylinder.vertices) + np.array([0, 0, cylinder_height / 2])
+                np.array(cylinder.vertices) + np.array([0, 0, axis["height"] / 2])
             )
-            cylinder.paint_uniform_color([0.8, 0.8, 1])
+            if axis["score"] > 0.25:
+                cylinder.paint_uniform_color([axis["score"], axis["score"] / 2, 0])
+            else:
+                cylinder.paint_uniform_color([1, 0, 0])
             cylinder.vertices = o3d.utility.Vector3dVector(
                 (np.array(cylinder.vertices) @ axis["transform"][:3, :3].T)
                 + axis["transform"][:3, 3]
             )
             cylinders.append(cylinder)
+        for axis in axes_nms:
+            cylinder = o3d.geometry.TriangleMesh.create_cylinder(
+                radius=axis["radius"], height=axis["height"] * 1.2
+            )
+            # shift up or down depending on third component of pca. Thus the
+            # cylinder allways covers the pc
+            cylinder.vertices = o3d.utility.Vector3dVector(
+                np.array(cylinder.vertices) + np.array([0, 0, axis["height"] / 2])
+            )
+            cylinder.paint_uniform_color([0, 1, 0])
+            cylinder.vertices = o3d.utility.Vector3dVector(
+                (np.array(cylinder.vertices) @ axis["transform"][:3, :3].T)
+                + axis["transform"][:3, 3]
+            )
+            cylinders_nms.append(cylinder)
+
         o3d.visualization.draw_geometries(
-            [c["cloud"].to_legacy() for c in axes] + cylinders
+            [cloud.to_legacy()] + cylinders + cylinders_nms
         )
+    axes = axes_nms
 
     # 6. Perform voronoi tesselation of point cloud without floor
     # calculate distance to each axis
@@ -486,19 +552,19 @@ def voronoi(  # noqa: C901
             np.arange(precise_dists.shape[0]), precise_labels
         ]
         if point_fraction < 1.0:
-            labels = np.empty((points_numpy.shape[0]), dtype=np.int32)
+            final_labels = np.empty((points_numpy.shape[0]), dtype=np.int32)
             min_dists = np.empty((points_numpy.shape[0]))
             # fill precise values
-            labels[precise_mask] = precise_labels
+            final_labels[precise_mask] = precise_labels
             min_dists[precise_mask] = precise_min_dists
             # find other values using cKD tree
             kd_tree = cKDTree(points_numpy[precise_mask])
             _, idcs = kd_tree.query(points_numpy[~precise_mask], k=1, workers=-1)
-            labels[~precise_mask] = precise_labels[idcs]
+            final_labels[~precise_mask] = precise_labels[idcs]
             min_dists[~precise_mask] = precise_min_dists[idcs]
         else:
             dists = precise_dists
-            labels = precise_labels
+            final_labels = precise_labels
             min_dists = precise_min_dists
 
         if debug_level > 0:
@@ -506,19 +572,20 @@ def voronoi(  # noqa: C901
         # dists = pnts_to_axes_sq_dist(points_numpy, axes_np)
 
         if max_cluster_radius != np.inf:
-            labels[min_dists > max_cluster_radius**2] = -1
+            final_labels[min_dists > max_cluster_radius**2] = -1
 
     with timer("data grooming"):
         # remove clusters with fewer than 50 points
         filtered_axes = []
-        unique_labels, counts = np.unique(labels, return_counts=True)
+        unique_labels, counts = np.unique(final_labels, return_counts=True)
         for label, count in zip(unique_labels, counts):
             if count < 50:
-                labels[labels == label] = -1
-        # make sure the label index is continuous
-        unique_labels = np.sort(np.unique(labels))
+                final_labels[final_labels == label] = -1
+        # make sure the label index is continuous. This works because new labels are
+        # sure to be smaller than the labels with gaps in them
+        unique_labels = np.sort(np.unique(final_labels))
         for i, label in enumerate(unique_labels[1:]):
-            labels[labels == label] = i
+            final_labels[final_labels == label] = i
             filtered_axes.append(axes[label])
         # denormalize heights in clusters
         if cloth is not None:
@@ -526,7 +593,22 @@ def voronoi(  # noqa: C901
             terrain_heights = height_interpolator(tree_centers)
             for i, axis in enumerate(filtered_axes):
                 axis["transform"][2, 3] += terrain_heights[i]
+
+    if debug_level > 1:
+        print("VIZ: Voronoi Clustering")
+        clusters = []
+        for label in np.unique(final_labels):
+            if label == -1:
+                continue
+            cluster_points = cloud.select_by_mask(final_labels == label)
+            cluster_points.paint_uniform_color(hls_to_rgb(np.random.rand(), 0.6, 1.0))
+            clusters.append(cluster_points.to_legacy())
+        o3d.visualization.draw_geometries(clusters + cylinders_nms + cylinders)
     if debug_level > 0:
         print(timer)
 
-    return labels, filtered_axes
+    # renormalize heights
+    if cloth is not None:
+        cloud.point.positions[:, 2] += heights.astype(np.float32)
+
+    return final_labels, filtered_axes
