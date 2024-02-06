@@ -8,6 +8,7 @@ from scipy.spatial.transform import Rotation
 from plotly import graph_objects as go
 from scipy.spatial import cKDTree
 import trimesh
+from digiforest_analysis.utils.matrix_calc import efficient_inv
 
 
 class Circle:
@@ -329,49 +330,44 @@ class Circle:
         points,
         min_radius: float = 0.0,
         max_radius: float = np.inf,
-        max_points: int = 100,
+        center_region: "Circle" = None,
+        max_circles: int = 500,
         search_radius: float = 0.05,
         sample_percentage: float = 0.01,
         sampling: str = "weighted",
+        circle_height: float = 0.0,
+        **kwargs,
     ):
         if len(points) < 10:
             return None
         points = points[:, :2]
         # sampling triplets of points
-        if sampling == "weighted" or (
-            len(points) > (np.inf if max_points in (-1, None) else max_points)
-        ):
+        if sampling == "weighted":
             # construct weights by distance to closest neighbor i.e. local density
             dist_to_closest_neighbor = cKDTree(points).query(points, k=2)[0][:, 1]
             probas = np.exp(-dist_to_closest_neighbor)
-            probas -= probas.min()
+            probas -= probas.min() - 1e-12
             probas /= probas.max()
-        if len(points) > (np.inf if max_points in (-1, None) else max_points):
-            # resample points if more than max_samples
-            indices = np.random.choice(
-                len(points), max_points, p=probas / probas.sum(), replace=False
-            )
-            points = points[indices]
-            probas = probas[indices]
 
-        num_points = points.shape[0]
-        num_samples = int(
-            num_points * (num_points - 1) * (num_points - 2) * sample_percentage
-        )
-        num_samples = max(num_samples, num_points)
+        N_points = points.shape[0]
+        N_circs = int(N_points * (N_points - 1) * (N_points - 2) * sample_percentage)
+        N_circs = max(N_points, min(N_circs, max_circles))
+        N_circs = min(max(N_points, N_circs), max_circles)
 
         if sampling == "weighted":
             indices = (
-                (1 - np.random.rand(num_samples, len(points)) * probas)
+                (1 - np.random.rand(N_circs, len(points)) * probas)
             ).argpartition(3, axis=1)[:, :3]
         elif sampling == "random":
-            indices = ((1 - np.random.rand(num_samples, len(points)))).argpartition(
+            indices = ((1 - np.random.rand(N_circs, len(points)))).argpartition(
                 3, axis=1
             )[:, :3]
         elif sampling == "full":
             indices = np.array(list(product(range(len(points)), repeat=3)))
             mask = np.logical_and(
-                indices[:, 0] != indices[:, 1], indices[:, 0] != indices[:, 2]
+                indices[:, 0] != indices[:, 1],
+                indices[:, 0] != indices[:, 2],
+                indices[:, 1] != indices[:, 2],
             )
             mask = np.logical_and(mask, indices[:, 1] != indices[:, 2])
             indices = indices[mask]
@@ -382,10 +378,40 @@ class Circle:
 
         # fitting circles to triplets
         circles = cls.from_3_2d_points(circle_points, method="bisectors")
+
+        # filter circles using constraints
         circles = circles[circles[:, 2] < max_radius]
         circles = circles[circles[:, 2] > min_radius]
+        if center_region is not None:
+            dists = np.linalg.norm(circles[:, :2] - center_region.center[:2], axis=1)
+            circles = circles[dists < center_region.radius]
+
         if len(circles) == 0:
             return None
+
+        # hough consensus using kdtree
+
+        # spheres = circles[0][None, :]
+        # sphere_members = [[0]]
+        # kdtree = cKDTree(spheres)
+        # for i_circle in range(1, len(circles)):
+        #     dist, index = kdtree.query(circles[i_circle], k=1)
+        #     if dist < search_radius:
+        #         sphere_members[index].append(i_circle)
+        #     else:
+        #         spheres = np.vstack((spheres, circles[i_circle]))
+        #         sphere_members.append([i_circle])
+        #         kdtree = cKDTree(spheres)
+        # best_sphere = sphere_members[np.argmax([len(sm) for sm in sphere_members])]
+        # best_circles = circles[best_sphere]
+
+        query_circles = circles.copy()
+        query_circles[:, 2] *= 2
+        kdtree = cKDTree(query_circles)
+        neighbors = kdtree.query_ball_tree(kdtree, r=search_radius)
+        best_index = neighbors.index(max(neighbors, key=len))
+        best_circle_inds = neighbors[best_index] + [best_index]
+        best_circles = circles[best_circle_inds]
 
         # # fitting quality
         # with timer("resampling circles"):
@@ -395,18 +421,6 @@ class Circle:
         #     dists = dists.mean(axis=1)
         #     probas = np.exp(-dists)
         #     circles = circles[np.random.rand(circles.shape[0]) < probas]
-
-        # hough consensus using kdtree
-        query_circles = circles.copy()
-        query_circles[:, 2] *= 2
-        kdtree = cKDTree(circles)
-        neighbors = kdtree.query_ball_tree(kdtree, r=search_radius)
-        best_index = neighbors.index(max(neighbors, key=len))
-        best_circle_inds = neighbors[best_index] + [best_index]
-        best_circles = circles[best_circle_inds]
-
-        # best_circle = np.average(best_circles, weights=probas[best_circle_inds], axis=0)
-        best_circle = best_circles.mean(axis=0)
 
         # # 3d plot points and color by number of neighbors
         # fig = go.Figure(data=[
@@ -436,7 +450,14 @@ class Circle:
         # ])
         # fig['layout']['showlegend'] = False
         # fig.show()
-        return cls(center=(best_circle[0], best_circle[1], 0), radius=best_circle[2])
+
+        # best_circle = np.average(best_circles, weights=probas[best_circle_inds], axis=0)
+        best_circle = best_circles.mean(axis=0)
+
+        return cls(
+            center=(best_circle[0], best_circle[1], circle_height),
+            radius=best_circle[2],
+        )
 
     @classmethod
     def from_cloud_lm(  # NOT TESTED!
@@ -535,8 +556,11 @@ class Circle:
             v0 = np.flip(v0, axis=1) * np.array([1, -1])
             v1 = points[:, 2, :] - points[:, 1, :]
             v1 = np.flip(v1, axis=1) * np.array([1, -1])
-            alpha = p1[:, 1] - p0[:, 1] + (p0[:, 0] - p1[:, 0]) * v1[:, 1] / v1[:, 0]
-            alpha /= v0[:, 1] - v0[:, 0] * v1[:, 1] / v1[:, 0]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                alpha = (
+                    p1[:, 1] - p0[:, 1] + (p0[:, 0] - p1[:, 0]) * v1[:, 1] / v1[:, 0]
+                )
+                alpha /= v0[:, 1] - v0[:, 0] * v1[:, 1] / v1[:, 0]
             x = p0[:, 0] + alpha * v0[:, 0]
             y = p0[:, 1] + alpha * v0[:, 1]
             r = np.sqrt((x - points[:, 0, 0]) ** 2 + (y - points[:, 0, 1]) ** 2)
@@ -701,7 +725,7 @@ class Tree:
 
     @property
     def axis(self) -> dict:
-        """Returns Axis of the tree in the ODOM FRAME. The axis is calculated as the
+        """Returns Axis of the tree in the MAP FRAME. The axis is calculated as the
         mean of all axis parameters of the clusters.
 
         Raises:
@@ -741,7 +765,16 @@ class Tree:
         if len(self.clusters) == 0:
             raise ValueError("No measurements available yet.")
 
-        # TODO ICP in x-y-plane to align all points
+        # align points using axes
+        ax_locs_map = np.stack(
+            (c["info"]["T_sensor2map"] @ c["info"]["axis"]["transform"][:, 3])
+            for c in self.clusters
+        )
+        ax_locs_axis = (efficient_inv(self.axis["transform"]) @ ax_locs_map.T).T
+        delta_translations_axis = np.concatenate(
+            (ax_locs_axis[:, :2], np.zeros((len(ax_locs_axis), 2))), axis=1
+        )
+        delta_translations_map = (self.axis["transform"] @ delta_translations_axis.T).T
 
         # transform all points to odom frame and then stack them
         return np.vstack(
@@ -749,7 +782,8 @@ class Tree:
                 cluster["cloud"].point.positions.numpy()
                 @ cluster["info"]["T_sensor2map"][:3, :3].T
                 + cluster["info"]["T_sensor2map"][:3, 3]
-                for cluster in self.clusters
+                - delta[:3]
+                for cluster, delta in zip(self.clusters, delta_translations_map)
             ]
         )
 
@@ -1031,4 +1065,7 @@ class Tree:
             return mesh.vertices, mesh.faces
 
     def __str__(self) -> str:
-        return f"Tree {self.id} with {len(self.circles)} circles"
+        if self.circles is not None:
+            return f"Tree {self.id} with {len(self.circles)} circles and {len(self.clusters)} clusters"
+        else:
+            return f"Tree {self.id} with no circles and {len(self.clusters)} clusters"
