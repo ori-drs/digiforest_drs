@@ -85,8 +85,6 @@ if __name__ == "__main__":
         max_cluster_radius=2,
         n_threads=1,
         point_fraction=0.1,
-        crop_lower_bound=4,
-        crop_upper_bound=6,
     )
 
     # # visualize clusters and full pc
