@@ -30,17 +30,14 @@ class TreeSegmentationVoronoi(BaseTask):
             dict: cluster dicts
         """
         cloud = kwargs.get("cloud")
+        del kwargs["cloud"]
         assert len(cloud.point.normals) > 0
 
         # Prefiltering
         cloud = self.prefiltering(cloud)
 
         # Extract clusters
-        labels, axes = voronoi(
-            cloud,
-            cloth=kwargs.get("cloth", None),
-            debug_level=self._debug_level,
-        )
+        labels, axes = voronoi(cloud, debug_level=self._debug_level, **kwargs)
 
         clusters = []
         num_labels = labels.max() + 1

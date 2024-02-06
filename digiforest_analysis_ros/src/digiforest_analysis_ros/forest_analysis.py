@@ -209,7 +209,7 @@ class ForestAnalysis:
         )
 
         self._pub_cluster_labels = rospy.Publisher(
-            "digiforest_forest_analysis/debug/cluster_clouds",
+            "digiforest_forest_analysis/debug/cluster_labels",
             MarkerArray,
             queue_size=1,
             latch=True,
@@ -530,6 +530,8 @@ class ForestAnalysis:
             self._tree_manager.tree_reco_flags,
             self._tree_manager.tree_coverage_angles,
         ):
+            if len(tree.clusters) < 3:
+                continue
             label_texts.append(
                 f"##### tree{str(tree.id).zfill(3)} #####\n"
                 + f"angle:     {np.rad2deg(coverage_angle):.0f} deg\n"
@@ -544,25 +546,27 @@ class ForestAnalysis:
                     verts, tris, id=tree.id, frame_id=self._map_frame_id
                 )
             )
-            if len(tree.clusters) > 5:
-                # sample random hue and for all clusters random brighntess between 0.5 and 1
-                hue = np.random.rand()
-                lightness = [
-                    np.random.rand() * 0.6 + 0.2 for _ in range(len(tree.clusters))
-                ]
-                tree_colors.extend(
-                    [colorsys.hls_to_rgb(hue, l, 1.0) for l in lightness]
-                )
-                # add voxel downsampled pcs to tree_clouds
-                tree_clouds.extend(
-                    [
-                        cluster["cloud"]
-                        .clone()
-                        .transform(cluster["info"]["T_sensor2map"])
-                        .point.positions.numpy()
-                        for cluster in tree.clusters
-                    ]
-                )
+
+            # sample random hue and for all clusters random brighntess between 0.5 and 1
+            hue = np.random.rand()
+            # lightness = [
+            #     np.random.rand() * 0.6 + 0.2 for _ in range(len(tree.clusters))
+            # ]
+            # tree_colors.extend(
+            #     [colorsys.hls_to_rgb(hue, l, 1.0) for l in lightness]
+            # )
+            # # add voxel downsampled pcs to tree_clouds
+            # tree_clouds.extend(
+            #     [
+            #         cluster["cloud"]
+            #         .clone()
+            #         .transform(cluster["info"]["T_sensor2map"])
+            #         .point.positions.numpy()
+            #         for cluster in tree.clusters
+            #     ]
+            # )
+            tree_clouds.append(tree.points)
+            tree_colors.append(colorsys.hls_to_rgb(hue, 0.6, 1.0))
 
         self._pub_tree_meshes.publish(mesh_messages)
         self.publish_cluster_labels(label_texts, label_positions, self._map_frame_id)
@@ -587,6 +591,11 @@ class ForestAnalysis:
 
     def shutdown_routine(self, *args):
         """Executes the operations before killing the mission analysis procedures"""
+        for tree in self._tree_manager.trees:
+            # write tree as pickle
+            path = "/home/ori/git/digiforest_drs/trees/logs/raw/"
+            with open(path + f"tree{str(tree.id).zfill(3)}.pkl", "wb") as file:
+                pickle.dump(tree, file)
         self._clustering_pool.close()
         rospy.loginfo("Digiforest Analysis node stopped!")
 
@@ -888,7 +897,8 @@ class TreeManager:
             weights[verts_mask.reshape(query_X.shape), i] = mesh_weights[
                 mesh_map.faces[tri_inds]
             ].mean(axis=1)
-        heights = np.sum(heights * weights, axis=2) / weights.sum(axis=2)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            heights = np.sum(heights * weights, axis=2) / weights.sum(axis=2)
 
         # convert to vertices and triangles
         mgrid = np.stack((query_X, query_Y, heights), axis=2)

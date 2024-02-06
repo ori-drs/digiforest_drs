@@ -26,21 +26,4 @@ class TerrainFitting(BaseTask):
         num_y_cos = np.unique(verts[:, 1]).shape[0]
         cloth = verts.reshape((num_y_cos, num_x_cos, 3)).transpose((1, 0, 2))
 
-        # # round to mm to make sure there are no duplicates
-        # x_cos = np.sort(np.unique(verts[:, 0]))
-        # y_cos = np.sort(np.unique(verts[:, 1]))
-        # X, Y = np.meshgrid(x_cos, y_cos, indexing='ij')
-        # Z = np.zeros_like(X)
-        # x_id, y_id = np.meshgrid(np.arange(x_cos.shape[0]), np.arange(y_cos.shape[0]), indexing='ij')
-        # x_id, y_id = x_id.reshape(-1), y_id.reshape(-1)
-        # Z[x_id, y_id] = verts[:, 2]
-
-        # # show using plt
-        # fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
-        # ax.plot_surface(X, Y, Z, cmap=cm.coolwarm, linewidth=0, antialiased=False)
-        # plt.show()
-        # raise ValueError
-
-        # cloth = np.stack((X, Y, Z), axis=-1)
-
         return cloth
