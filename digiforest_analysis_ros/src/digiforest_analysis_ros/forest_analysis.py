@@ -34,6 +34,7 @@ from digiforest_analysis_ros.utils import (
     apply_transform,
 )
 from digiforest_analysis.utils.meshing import meshgrid_to_mesh
+from digiforest_analysis.utils.distances import distance_line_to_line
 
 timer = Timer()
 # ignore divide by zero warnings, code actively works with nans
@@ -41,6 +42,7 @@ np.seterr(divide="ignore", invalid="ignore")
 
 # cd ~/catkin_ws/src/vilens_config/vc_stein_am_rhein/config/procman && rosrun procman_ros sheriff -l frontier.pmd
 # cd ~/logs/logs_evo_finland/exp01 && rosbag play frontier_2023-05-01-14-* --clock --pause --topics /hesai/pandar /alphasense_driver_ros/imu  -r 1
+# cd ~/logs/logs_stein_am_rhein/2023-08-08-16-14-48-exp03 && rosbag play *.bag --clock --pause --topics /hesai/pandar /alphasense_driver_ros/imu  -r 1
 
 
 class ForestAnalysis:
@@ -59,6 +61,7 @@ class ForestAnalysis:
             self._terrain_confidence_stds,
             self._terrain_confidence_sensor_weight,
             self._terrain_use_embree,
+            self._generate_canopy_mesh,
         )
 
         self.last_pc_header = None
@@ -87,11 +90,17 @@ class ForestAnalysis:
         )
 
         # Publishers
-        self._tree_meshes_topic = rospy.get_param(
-            "~tree_meshes_topic", "digiforest_forest_analysis/tree_meshes"
+        self._stem_meshes_topic = rospy.get_param(
+            "~topic/stem_meshes", "/digiforest_forest_analysis/stem_meshes"
+        )
+        self._canopy_meshes_topic = rospy.get_param(
+            "~topic/canopy_meshes", "/digiforest_forest_analysis/canopy_meshes"
         )
         self._debug_clusters_topic = rospy.get_param(
-            "~topic/debug_clusters", "digiforest_forest_analysis/debug/cluster_clouds"
+            "~topic/debug_clusters", "/digiforest_forest_analysis/debug/cluster_clouds"
+        )
+        self._terrain_topic = rospy.get_param(
+            "~topic/terrain_model", "/digiforest_forest_analysis/terrain"
         )
 
         # Tree Manager
@@ -163,6 +172,7 @@ class ForestAnalysis:
             "~fitting/save_debug_results", False
         )
         self._fitting_n_threads = rospy.get_param("~fitting/n_threads", 1)
+        self._generate_canopy_mesh = rospy.get_param("~fitting/generate_canopy", True)
 
         # Internals
         self._tf_buffer = None
@@ -200,35 +210,33 @@ class ForestAnalysis:
         self._path_cloud_synchronizer.registerCallback(self.payload_with_path_callback)
 
         # Publishers
-        self._pub_tree_meshes = rospy.Publisher(
-            self._tree_meshes_topic, MarkerArray, queue_size=1, latch=True
+        self._pub_stem_meshes = rospy.Publisher(
+            self._stem_meshes_topic, MarkerArray, queue_size=1, latch=True
         )
-
         self._pub_debug_clusters = rospy.Publisher(
             self._debug_clusters_topic, PointCloud2, queue_size=1, latch=True
         )
-
+        self._pub_terrain_model = rospy.Publisher(
+            self._terrain_topic, Marker, queue_size=1, latch=True
+        )
+        self._pub_canopy_meshes = rospy.Publisher(
+            self._canopy_meshes_topic, MarkerArray, queue_size=1, latch=True
+        )
         self._pub_cluster_labels = rospy.Publisher(
-            "digiforest_forest_analysis/debug/cluster_labels",
+            "/digiforest_forest_analysis/debug/cluster_labels",
             MarkerArray,
             queue_size=1,
             latch=True,
         )
         self._pub_cropped_pc = rospy.Publisher(
-            "digiforest_forest_analysis/debug/cropped_pc",
+            "/digiforest_forest_analysis/debug/cropped_pc",
             PointCloud2,
             queue_size=1,
             latch=True,
         )
         self._pub_tree_clusters = rospy.Publisher(
-            "digiforest_forest_analysis/debug/tree_clusters",
+            "/digiforest_forest_analysis/debug/tree_clusters",
             PointCloud2,
-            queue_size=1,
-            latch=True,
-        )
-        self._pub_terrain_model = rospy.Publisher(
-            "digiforest_forest_analysis/debug/terrain_model",
-            Marker,
             queue_size=1,
             latch=True,
         )
@@ -520,6 +528,7 @@ class ForestAnalysis:
         label_texts = []
         label_positions = []
         mesh_messages = MarkerArray()
+        canopy_messages = MarkerArray()
         print("Publishing Tree Manager State")
 
         # trees with labels
@@ -565,8 +574,19 @@ class ForestAnalysis:
             )
             # tree_clouds.append(tree.points)
             # tree_colors.append(colorsys.hls_to_rgb(hue, 0.6, 1.0))
+            if tree.canopy_mesh is not None:
+                message = self.genereate_mesh_msg(
+                    tree.canopy_mesh["verts"],
+                    tree.canopy_mesh["tris"],
+                    id=tree.id,
+                    frame_id=self._map_frame_id,
+                    color=[150 / 255, 217 / 255, 121 / 255],
+                    alpha=0.5,
+                )
+                canopy_messages.markers.append(message)
 
-        self._pub_tree_meshes.publish(mesh_messages)
+        self._pub_stem_meshes.publish(mesh_messages)
+        self._pub_canopy_meshes.publish(canopy_messages)
         self.publish_cluster_labels(label_texts, label_positions, self._map_frame_id)
         if len(tree_clouds) > 0:
             self.publish_pointclouds(
@@ -589,11 +609,14 @@ class ForestAnalysis:
 
     def shutdown_routine(self, *args):
         """Executes the operations before killing the mission analysis procedures"""
-        for tree in self._tree_manager.trees:
-            # write tree as pickle
-            path = "/home/ori/git/digiforest_drs/trees/logs/raw/"
-            with open(path + f"tree{str(tree.id).zfill(3)}.pkl", "wb") as file:
-                pickle.dump(tree, file)
+        path = "/home/ori/git/digiforest_drs/trees/logs/raw/"
+        # for tree in self._tree_manager.trees:
+        #     # write tree as pickle
+        #     with open(path + f"tree{str(tree.id).zfill(3)}.pkl", "wb") as file:
+        #         pickle.dump(tree, file)
+        # save terrain model as pickle
+        with open(path + "tree_manager.pkl", "wb") as file:
+            pickle.dump(self._tree_manager, file)
         self._clustering_pool.close()
         rospy.loginfo("Digiforest Analysis node stopped!")
 
@@ -609,6 +632,7 @@ class TreeManager:
         terrain_confidence_stds: list = [3, 10, 10],
         terrain_confidence_sensor_weight: float = 0.9999,
         terrain_use_embree: bool = True,
+        generate_canopy_mesh: bool = True,
     ) -> None:
         """constructor of the TreeManager class
 
@@ -633,6 +657,8 @@ class TreeManager:
                 confidence model wrt just the distance of the ground mesh from the path.
             use_embree (bool, optional): Flag to use Embree for ray tracing (faster but
                 inferior quality). Defaults to True.
+            generate_canopy_mesh (bool, optional): Flag to generate the canopy mesh.
+                Defaults to True.
         """
         self.distance_threshold = distance_threshold
         self.reco_min_angle_coverage = reco_min_angle_coverage
@@ -642,6 +668,7 @@ class TreeManager:
         self.terrain_confidence_stds = terrain_confidence_stds
         self.terrain_confidence_sensor_weight = terrain_confidence_sensor_weight
         self.use_embree = terrain_use_embree
+        self.generate_canopy_mesh = generate_canopy_mesh
 
         self.tree_reco_flags: List[List[bool]] = []
         self.tree_coverage_angles: List[float] = []
@@ -673,73 +700,6 @@ class TreeManager:
         self.tree_reco_flags.append({"angle_flag": False, "distance_flag": False})
         self.tree_coverage_angles.append(0.0)
         self.num_trees += 1
-
-    def distance_line_to_line(
-        self, line_1: dict, line_2: dict, clip_heights: List[float] = None
-    ) -> float:
-        """Calculates the minum distance between two axes. If the keyword "axis_length"
-        is present in the dicts, the closest points are bounded to be between the basis
-        point of the axis and not further away from the basis point in the z direction
-        of the given rot_mat than the axis_length. Otherwise, the closest points can be
-        anywhere on the axis.
-        If the key "axis_length" is not present in the dicts, the distance is not bound
-            by constraining the closest points to be on the axis.
-
-        Args:
-            line1 (dict): Dict with the keys "transform" and optionally
-                "axis_length" describing the first axis.
-            line2 (dict): Dict with the keys "transform" and optionally
-                "axis_length" describing the second axis.
-            clip_heights (List[float], optional): If present, the z component of the closest points are
-                bounded to be between global these heights in the frame of the axes.
-                Defaults to None.
-
-        Returns:
-            float: minimum distance between axes
-        """
-        axis_pnt_1 = line_1["transform"][:3, 3]
-        axis_pnt_2 = line_2["transform"][:3, 3]
-        axis_dir_1 = line_1["transform"][:3, 2]
-        axis_dir_2 = line_2["transform"][:3, 2]
-        normal = np.cross(axis_dir_1, axis_dir_2)
-        normal_length = np.linalg.norm(normal)
-        if np.isclose(normal_length, 0.0):
-            meeting_point_1 = axis_pnt_1
-            # Part of Gram Schmidt
-            meeting_point_2 = axis_pnt_1 - axis_dir_1 * (
-                (axis_pnt_2 - axis_pnt_1) @ axis_dir_1
-            )
-        else:
-            normal /= np.linalg.norm(normal_length)
-            v_normal = np.cross(axis_dir_1, normal)
-            v_normal /= np.linalg.norm(v_normal)
-            w_normal = np.cross(axis_dir_2, normal)
-            w_normal /= np.linalg.norm(w_normal)
-            s = w_normal @ (axis_pnt_2 - axis_pnt_1) / (w_normal @ axis_dir_1)
-            t = v_normal @ (axis_pnt_1 - axis_pnt_2) / (v_normal @ axis_dir_2)
-
-            meeting_point_1 = axis_pnt_1 + s * axis_dir_1
-            meeting_point_2 = axis_pnt_2 + t * axis_dir_2
-
-        if clip_heights is not None:
-            if meeting_point_1[2] < clip_heights[0]:
-                meeting_point_1 -= (
-                    axis_dir_1 * (meeting_point_1[2] - clip_heights[0]) / axis_dir_1[2]
-                )
-            if meeting_point_1[2] > clip_heights[1]:
-                meeting_point_1 -= (
-                    axis_dir_1 * (meeting_point_1[2] - clip_heights[1]) / axis_dir_1[2]
-                )
-            if meeting_point_2[2] < clip_heights[0]:
-                meeting_point_2 -= (
-                    axis_dir_2 * (meeting_point_2[2] - clip_heights[0]) / axis_dir_2[2]
-                )
-            if meeting_point_2[2] > clip_heights[1]:
-                meeting_point_2 -= (
-                    axis_dir_2 * (meeting_point_2[2] - clip_heights[1]) / axis_dir_2[2]
-                )
-
-        return np.linalg.norm(meeting_point_1 - meeting_point_2)
 
     def add_clusters(self, clusters_base: List[dict]):
         """This function checks every cluster (in BASE FRAME). If a tree close to the
@@ -782,7 +742,7 @@ class TreeManager:
                     candidate_axis["transform"] = candidate_transforms_odom[i_candidate]
                     existing_axis = self.trees[i_existing].axis
 
-                    distance = self.distance_line_to_line(
+                    distance = distance_line_to_line(
                         candidate_axis, existing_axis, clip_heights=[0, 10]
                     )
                     if distance < self.distance_threshold:
@@ -1196,6 +1156,8 @@ class TreeManager:
             if reco_sucess:
                 tree.num_clusters_after_last_reco = len(tree.clusters)
                 tree.cosys_changed_after_last_reco = False
+                if self.generate_canopy_mesh:
+                    tree.generate_canopy()
             reco_happened |= reco_sucess
 
         return reco_happened

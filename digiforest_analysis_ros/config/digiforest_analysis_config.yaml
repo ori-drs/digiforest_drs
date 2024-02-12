@@ -9,7 +9,9 @@ topic:
   payload_cloud: "/local_mapping/payload_in_local"
   payload_path: "/local_mapping/path"
   posegraph_update: "/vilens_slam/pose_graph"
-  tree_meshes: "/digiforest_forest_analysis/tree_meshes"
+  stem_meshes: "/digiforest_forest_analysis/stem_meshes"
+  canopy_meshes: "/digiforest_forest_analysis/canopy_meshes"
+  terrain_model: "/digiforest_forest_analysis/terrain_model"
 
 tree_manager:
   distance_threshold: 0.5
@@ -48,3 +50,4 @@ fitting:
   max_height: 15.0
   save_debug_results: False
   n_threads: 1  
+  generate_canopy: True
