@@ -1,7 +1,6 @@
 from colorsys import hls_to_rgb
 from functools import partial
 from multiprocessing import Pool
-import multiprocessing
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 import open3d as o3d
@@ -10,6 +9,7 @@ from scipy.spatial import cKDTree
 from digiforest_analysis.tasks.tree_reconstruction import Circle
 from digiforest_analysis.utils.timing import Timer
 from digiforest_analysis.utils.meshing import meshgrid_to_mesh
+from digiforest_analysis.utils.distances import pnts_to_axes_sq_dist
 
 timer = Timer()
 current_point_cloud = 0
@@ -149,66 +149,6 @@ def euclidean_pcl(cloud, **kwargs):
             labels[j] = i
 
     return labels
-
-
-def pnts_to_axes_sq_dist(
-    points: np.ndarray,
-    axes: np.ndarray,
-    apply_sqrt: bool = False,
-    debug_level: int = 0,
-) -> np.ndarray:
-    """Calculate the distance of all point to all axes. For efficiency, two planes are
-    constructed fore every axis, which is the intersection of them.
-    The distance of a point to the axis is then the L2 norm of the individual distances
-    to both planes. This is ~5 times faster than using the cross product.
-
-    Args:
-        pnt (np.ndarray[Nx3]): point in 3D space
-        axis (np.ndarray[Mx6]): axis in 3D space (direction vector, point on axis)
-        sqrt (bool, optional): whether to return the sqrt of the squared distance.
-            Defaults to False.
-        point_fraction (float, optional): fraction of points to use for
-            calculating the distance. The rest is determined by point to point distance
-            calculation. Defaults to 0.1.
-        debug_level (int, optional): verbosity level. Defaults to 0.
-
-    Returns:
-        np.ndarray[NxM]: (squared) distance of all points to all axes
-    """
-    if debug_level > 0:
-        print("Start calculating distances on ", multiprocessing.current_process().name)
-    axis_dirs = axes[:, :3]
-    axis_dirs /= np.linalg.norm(axis_dirs, axis=1, keepdims=True)
-    axis_pnts = axes[:, 3:]
-    # TODO handle case where axis direction is in x-y-plane
-    # (extremely unlikely for digiforest)
-    normals_a = np.vstack(
-        [np.zeros_like(axis_dirs[:, 0]), axis_dirs[:, 2], -axis_dirs[:, 1]]
-    ).T
-    normals_a /= np.linalg.norm(normals_a, axis=1)[:, None]
-    normals_b = np.cross(axis_dirs, normals_a)
-
-    # hesse normal form in einstein notation
-    if debug_level > 0:
-        print("axis_pnts_to_origin_a on thread", multiprocessing.current_process().name)
-    axis_pnts_to_origin_a = np.einsum("ij,ij->i", axis_pnts, normals_a)
-    if debug_level > 0:
-        print("axis_pnts_to_origin_b on thread", multiprocessing.current_process().name)
-    axis_pnts_to_origin_b = np.einsum("ij,ij->i", axis_pnts, normals_b)
-    if debug_level > 0:
-        print("signed_dist_a on thread", multiprocessing.current_process().name)
-    signed_dist_a = np.einsum("ij,kj->ik", points, normals_a) - axis_pnts_to_origin_a
-    if debug_level > 0:
-        print("signed_dist_b on thread", multiprocessing.current_process().name)
-    signed_dist_b = np.einsum("ij,kj->ik", points, normals_b) - axis_pnts_to_origin_b
-    # this is much faster than np.power and np.sum ?! ^^
-    if debug_level > 0:
-        print("squaring on thread", multiprocessing.current_process().name)
-    sq_dists = signed_dist_a * signed_dist_a + signed_dist_b * signed_dist_b
-
-    if debug_level > 0:
-        print("Done calculating distances on", multiprocessing.current_process().name)
-    return np.sqrt(sq_dists) if apply_sqrt else sq_dists
 
 
 def voronoi(  # noqa: C901
