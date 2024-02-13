@@ -609,7 +609,14 @@ class ForestAnalysis:
 
     def shutdown_routine(self, *args):
         """Executes the operations before killing the mission analysis procedures"""
-        path = "/home/ori/git/digiforest_drs/trees/logs/raw/"
+        import rospkg
+        import os
+        package_path = rospkg.RosPack().get_path("digiforest_analysis_ros")
+        base_output_path = os.path.join(package_path, "output")
+        
+        path = f"{base_output_path}/trees/logs/raw/"
+        os.makedirs(path, exist_ok=True)
+
         # for tree in self._tree_manager.trees:
         #     # write tree as pickle
         #     with open(path + f"tree{str(tree.id).zfill(3)}.pkl", "wb") as file:

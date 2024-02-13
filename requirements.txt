@@ -8,6 +8,7 @@ scikit-image
 Cython
 matplotlib
 pandas
+numexpr>=2.7.3
 seaborn
 shapely
 pyyaml
@@ -19,3 +20,4 @@ opencv-python
 trimesh
 pyembree
 cloth-simulation-filter
+git+https://github.com/eric-wieser/ros_numpy

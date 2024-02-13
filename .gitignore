@@ -7,3 +7,5 @@ cloth_nodes.txt
 trees/*
 terrains/*
 payload_clouds/*
+*/output/*
+*/env
