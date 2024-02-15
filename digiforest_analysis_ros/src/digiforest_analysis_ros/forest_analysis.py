@@ -48,6 +48,11 @@ np.seterr(divide="ignore", invalid="ignore")
 
 class ForestAnalysis:
     def __init__(self) -> None:
+        # Initialize path for outputs
+        package_path = rospkg.RosPack().get_path("digiforest_analysis_ros")
+        self.base_output_path = os.path.join(package_path, "output")
+        os.makedirs(self.base_output_path, exist_ok=True)
+
         self.read_params()
         self.setup_ros()
 
@@ -63,12 +68,8 @@ class ForestAnalysis:
             self._terrain_confidence_sensor_weight,
             self._terrain_use_embree,
             self._generate_canopy_mesh,
+            output_path=self.base_output_path,
         )
-
-        # Initialize path for outputs
-        package_path = rospkg.RosPack().get_path("digiforest_analysis_ros")
-        self.base_output_path = os.path.join(package_path, "output")
-        os.makedirs(self.base_output_path, exist_ok=True)
 
         self.last_pc_header = None
         self.pc_counter = 0
@@ -641,6 +642,7 @@ class TreeManager:
         terrain_confidence_sensor_weight: float = 0.9999,
         terrain_use_embree: bool = True,
         generate_canopy_mesh: bool = True,
+        output_path: str = "/tmp"
     ) -> None:
         """constructor of the TreeManager class
 
@@ -677,6 +679,7 @@ class TreeManager:
         self.terrain_confidence_sensor_weight = terrain_confidence_sensor_weight
         self.use_embree = terrain_use_embree
         self.generate_canopy_mesh = generate_canopy_mesh
+        self.base_output_path = output_path
 
         self.tree_reco_flags: List[List[bool]] = []
         self.tree_coverage_angles: List[float] = []
