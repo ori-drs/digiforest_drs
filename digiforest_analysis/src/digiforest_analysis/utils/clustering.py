@@ -179,11 +179,6 @@ def voronoi(  # noqa: C901
                 fill_value=0.0,
             )
             heights = height_interpolator(cloud.point.positions.numpy()[:, :2])
-            index = (12, 12)
-            p1 = np.array([cloth[index[0], 0, 0], cloth[0, index[1], 1]])
-            v_true = cloth[index[0], index[1], 2]
-            v_interp = height_interpolator(p1)
-            print(v_true, v_interp)
             cloud_orig = cloud.clone()
             cloud.point.positions[:, 2] -= heights.astype(np.float32)
 

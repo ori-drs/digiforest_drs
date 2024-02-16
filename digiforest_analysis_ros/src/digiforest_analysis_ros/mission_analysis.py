@@ -41,9 +41,6 @@ class MissionAnalysis:
         self._slam_graph_topic = rospy.get_param(
             "~slam_graph_topic", "/vilens_slam/slam_poses"
         )
-
-        print(rospy.get_param("~cluster_min_points", -1))
-
         self._state_twist = rospy.get_param("~twist_topic", "/vilens/twist_optimized")
         self._state_pose = rospy.get_param("~pose_topic", "/vilens/pose_optimized")
 

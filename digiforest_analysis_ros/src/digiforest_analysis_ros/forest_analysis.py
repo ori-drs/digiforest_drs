@@ -6,6 +6,7 @@ from copy import deepcopy
 from functools import partial
 import os
 import pickle
+from digiforest_analysis.tasks.terrain_fitting import TerrainFitting
 import numpy as np
 import pandas as pd
 from scipy.spatial import cKDTree
@@ -43,7 +44,7 @@ np.seterr(divide="ignore", invalid="ignore")
 
 # cd ~/catkin_ws/src/vilens_config/vc_stein_am_rhein/config/procman && rosrun procman_ros sheriff -l frontier.pmd
 # cd ~/logs/logs_evo_finland/exp01 && rosbag play frontier_2023-05-01-14-* --clock --pause --topics /hesai/pandar /alphasense_driver_ros/imu  -r 1
-# cd ~/logs/logs_stein_am_rhein/2023-08-08-16-14-48-exp03 && rosbag play *.bag --clock --pause --topics /hesai/pandar /alphasense_driver_ros/imu  -r 1
+# cd ~/logs/logs_stein_am_rhein/C3/ && rosbag play *.bag --clock --pause --topics /hesai/pandar /alphasense_driver_ros/imu  -r 1
 
 
 class ForestAnalysis:
@@ -69,11 +70,21 @@ class ForestAnalysis:
             self._terrain_use_embree,
             self._generate_canopy_mesh,
             output_path=self.base_output_path,
+            debug_level=self._debug_level,
         )
+        if self._terrain_enabled:
+            self.terrain_fitter = TerrainFitting(
+                sloop_smooth=self._terrain_smoothing,
+                cloth_cell_size=self._terrain_cloth_cell_size,
+                debug_level=self._debug_level,
+            )
+        else:
+            self.terrain_fitter = None
 
         self.last_pc_header = None
         self.pc_counter = 0
         self.tree_manager_lock = Lock()
+        self.pose_graph_stamps = []
 
         rospy.on_shutdown(self.shutdown_routine)
 
@@ -453,10 +464,10 @@ class ForestAnalysis:
                     ]
                 )
 
+                verts_odom, tris = meshgrid_to_mesh(terrain)
+                verts_map = R_odom2map.apply(verts_odom) + t_odom2map
                 with self.tree_manager_lock:
                     self._tree_manager.add_clusters_with_path(clusters, path_sensor)
-                    verts_odom, tris = meshgrid_to_mesh(terrain)
-                    verts_map = R_odom2map.apply(verts_odom) + t_odom2map
                     self._tree_manager.add_terrain(
                         verts_map,
                         tris,
@@ -468,21 +479,22 @@ class ForestAnalysis:
 
             with timer("cwc/publishing_tree_manager"):
                 self.publish_tree_manager_state()
-                self._tree_manager.write_results(
-                    f"{self.base_output_path}/trees/logs"
-                )
+                self._tree_manager.write_results(f"{self.base_output_path}/trees/logs")
+
             if self._debug_level > 1:
                 with timer("cwc/dumping_clusters"):
-                    directory = os.path.join(f"{self.base_output_path}/trees", str(self.last_pc_header.stamp))
-                    if not os.path.exists(directory):
-                        os.makedirs(directory)
+                    cluster_dir = os.path.join(
+                        self.base_output_path, "trees", str(self.last_pc_header.stamp)
+                    )
+                    if not os.path.exists(cluster_dir):
+                        os.makedirs(cluster_dir, exist_ok=True)
                     else:
-                        for f in os.listdir(directory):
-                            os.remove(os.path.join(directory, f))
+                        for f in os.listdir(cluster_dir):
+                            os.remove(os.path.join(cluster_dir, f))
                     for cluster in clusters:
                         with open(
                             os.path.join(
-                                directory,
+                                cluster_dir,
                                 f"tree{str(cluster['info']['id']).zfill(3)}.pkl",
                             ),
                             "wb",
@@ -503,9 +515,7 @@ class ForestAnalysis:
                 "cloud_msg": cloud_odom,
                 "path_odom": path_odom,
                 "pose_graph_stamps": self.pose_graph_stamps,
-                "terrain_enabled": self._terrain_enabled,
-                "terrain_smoothing": self._terrain_smoothing,
-                "terrain_cloth_cell_size": self._terrain_cloth_cell_size,
+                "terrain_fitter": self.terrain_fitter,
                 "clustering_crop_radius": self._clustering_crop_radius,
                 "hough_filter_radius": self._clustering_hough_filter_radius,
                 "crop_lower_bound": self._clustering_crop_lower_bound,
@@ -615,8 +625,9 @@ class ForestAnalysis:
         )
 
     def shutdown_routine(self, *args):
-        """Executes the operations before killing the mission analysis procedures"""       
-        path = f"{self.base_output_path}/trees/logs/raw/"
+        """Executes the operations before killing the mission analysis procedures"""
+        path = os.path.join(self.base_output_path, "trees", "logs", "raw")
+        print(f"Creating directory{path}")
         os.makedirs(path, exist_ok=True)
 
         # for tree in self._tree_manager.trees:
@@ -624,8 +635,11 @@ class ForestAnalysis:
         #     with open(path + f"tree{str(tree.id).zfill(3)}.pkl", "wb") as file:
         #         pickle.dump(tree, file)
         # save terrain model as pickle
-        with open(path + "tree_manager.pkl", "wb") as file:
+
+        print(f"Dumping tree manager to {os.path.join(path, 'tree_manager.pkl')}")
+        with open(os.path.join(path, "tree_manager.pkl"), "wb") as file:
             pickle.dump(self._tree_manager, file)
+
         self._clustering_pool.close()
         rospy.loginfo("Digiforest Analysis node stopped!")
 
@@ -642,7 +656,8 @@ class TreeManager:
         terrain_confidence_sensor_weight: float = 0.9999,
         terrain_use_embree: bool = True,
         generate_canopy_mesh: bool = True,
-        output_path: str = "/tmp"
+        output_path: str = "/tmp",
+        debug_level: int = 0,
     ) -> None:
         """constructor of the TreeManager class
 
@@ -680,6 +695,7 @@ class TreeManager:
         self.use_embree = terrain_use_embree
         self.generate_canopy_mesh = generate_canopy_mesh
         self.base_output_path = output_path
+        self.debug_level = debug_level
 
         self.tree_reco_flags: List[List[bool]] = []
         self.tree_coverage_angles: List[float] = []
@@ -999,12 +1015,6 @@ class TreeManager:
             "path": path_map,
             "cell_size": cell_size,
         }
-
-        with open(
-            f"{self.base_output_path}/output/terrains/terrain_{time_stamp.to_nsec()}.pkl",
-            "wb",
-        ) as file:
-            pickle.dump(retval, file)
         self.terrains.append(retval)
 
     def update_poses(self, new_posegraph: List[PoseStamped]):
@@ -1162,7 +1172,9 @@ class TreeManager:
             if not angle_flag or not distance_flag:
                 continue
 
-            rospy.loginfo(f"Reconstructing tree {tree.id}")
+            if self.debug_level > 0:
+                rospy.loginfo(f"Reconstructing tree {tree.id}")
+
             reco_sucess = tree.reconstruct2()
             if reco_sucess:
                 tree.num_clusters_after_last_reco = len(tree.clusters)

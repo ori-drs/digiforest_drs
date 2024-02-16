@@ -5,7 +5,6 @@ import open3d as o3d
 import rospy
 
 from sensor_msgs.msg import PointCloud2
-from digiforest_analysis.tasks.terrain_fitting import TerrainFitting
 from digiforest_analysis.tasks.tree_segmentation_voronoi import TreeSegmentationVoronoi
 from digiforest_analysis.utils.matrix_calc import efficient_inv
 
@@ -60,9 +59,7 @@ def radius_crop_pc(
 def clustering_worker_fun(
     tf_buffer,
     cloud_msg,
-    terrain_enabled,
-    terrain_smoothing,
-    terrain_cloth_cell_size,
+    terrain_fitter,
     clustering_crop_radius,
     path_odom,
     pose_graph_stamps,
@@ -74,16 +71,17 @@ def clustering_worker_fun(
     debug_level,
     map_frame_id,
     odom_frame_id,
+    **kwargs,
 ):
-    terrain_fitter = TerrainFitting(
-        sloop_smooth=terrain_smoothing,
-        cloth_cell_size=terrain_cloth_cell_size,
-        debug_level=debug_level,
-    )
+    print("Cluster worker called")
 
     tree_segmenter = TreeSegmentationVoronoi(
         debug_level=debug_level,
     )
+
+    if pose_graph_stamps is None:
+        rospy.logerr("pose_graph_stamps is empty, maybe restarted node amid playback?")
+        return
 
     # find index closest to center of path that also is in posegraph
     center_index = len(path_odom.poses) // 2
@@ -120,7 +118,7 @@ def clustering_worker_fun(
                 center_pose=T_sensor2odom,
                 radius=clustering_crop_radius,
             )
-        if terrain_enabled:
+        if terrain_fitter is not None:
             with timer("cw/terrain"):
                 terrain = terrain_fitter.process(cloud=cloud)
         else:
@@ -137,15 +135,13 @@ def clustering_worker_fun(
                 point_fraction=point_fraction,
             )
         # convert clusters into stamped sensor frame
-        with timer("cw/transform"):
-            for i in range(len(clusters)):
-                clusters[i]["cloud"].transform(efficient_inv(T_sensor2odom))
-                clusters[i]["info"]["axis"]["transform"] = (
-                    efficient_inv(T_sensor2odom)
-                    @ clusters[i]["info"]["axis"]["transform"]
-                )
-                clusters[i]["info"]["T_sensor2map"] = T_sensor2map
-                clusters[i]["info"]["time_stamp"] = center_stamp
+        for i in range(len(clusters)):
+            clusters[i]["cloud"].transform(efficient_inv(T_sensor2odom))
+            clusters[i]["info"]["axis"]["transform"] = (
+                efficient_inv(T_sensor2odom) @ clusters[i]["info"]["axis"]["transform"]
+            )
+            clusters[i]["info"]["T_sensor2map"] = T_sensor2map
+            clusters[i]["info"]["time_stamp"] = center_stamp
 
     rospy.loginfo(f"Timing results of clustering:\n{timer}")
 
