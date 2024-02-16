@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <launch>
-  <arg name="venv" value="/home/ori/anaconda3/envs/digiforest/bin/python3" />
+  <arg name="venv" value="$(find digiforest_analysis_ros)/env/bin/python3" />
   <node pkg="digiforest_analysis_ros" type="forest_analysis_node.py" name="digiforest_forest_analysis" output="screen" launch-prefix = "$(arg venv)">
     <rosparam file="$(find digiforest_analysis_ros)/config/digiforest_analysis_config.yaml" subst_value="true"/>
   </node>

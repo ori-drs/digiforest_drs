@@ -15,6 +15,7 @@ from typing import List, Tuple
 from threading import Lock
 from multiprocessing.pool import ThreadPool
 
+import rospkg
 import rospy
 import tf2_ros
 from sensor_msgs.msg import PointCloud2, PointField
@@ -47,6 +48,11 @@ np.seterr(divide="ignore", invalid="ignore")
 
 class ForestAnalysis:
     def __init__(self) -> None:
+        # Initialize path for outputs
+        package_path = rospkg.RosPack().get_path("digiforest_analysis_ros")
+        self.base_output_path = os.path.join(package_path, "output")
+        os.makedirs(self.base_output_path, exist_ok=True)
+
         self.read_params()
         self.setup_ros()
 
@@ -62,6 +68,7 @@ class ForestAnalysis:
             self._terrain_confidence_sensor_weight,
             self._terrain_use_embree,
             self._generate_canopy_mesh,
+            output_path=self.base_output_path,
         )
 
         self.last_pc_header = None
@@ -241,7 +248,7 @@ class ForestAnalysis:
             latch=True,
         )
 
-    def genereate_mesh_msg(
+    def generate_mesh_msg(
         self,
         vertices: np.ndarray,
         triangles: np.ndarray,
@@ -462,11 +469,11 @@ class ForestAnalysis:
             with timer("cwc/publishing_tree_manager"):
                 self.publish_tree_manager_state()
                 self._tree_manager.write_results(
-                    "/home/ori/git/digiforest_drs/trees/logs"
+                    f"{self.base_output_path}/trees/logs"
                 )
             if self._debug_level > 1:
                 with timer("cwc/dumping_clusters"):
-                    directory = os.path.join("trees", str(self.last_pc_header.stamp))
+                    directory = os.path.join(f"{self.base_output_path}/trees", str(self.last_pc_header.stamp))
                     if not os.path.exists(directory):
                         os.makedirs(directory)
                     else:
@@ -551,7 +558,7 @@ class ForestAnalysis:
 
             verts, tris = tree.generate_mesh()
             mesh_messages.markers.append(
-                self.genereate_mesh_msg(
+                self.generate_mesh_msg(
                     verts, tris, id=tree.id, frame_id=self._map_frame_id
                 )
             )
@@ -575,7 +582,7 @@ class ForestAnalysis:
             # tree_clouds.append(tree.points)
             # tree_colors.append(colorsys.hls_to_rgb(hue, 0.6, 1.0))
             if tree.canopy_mesh is not None:
-                message = self.genereate_mesh_msg(
+                message = self.generate_mesh_msg(
                     tree.canopy_mesh["verts"],
                     tree.canopy_mesh["tris"],
                     id=tree.id,
@@ -596,7 +603,7 @@ class ForestAnalysis:
         # Terrain
         verts, tris = self._tree_manager.get_terrain()
         self._pub_terrain_model.publish(
-            self.genereate_mesh_msg(
+            self.generate_mesh_msg(
                 verts,
                 tris,
                 frame_id=self._map_frame_id,
@@ -608,8 +615,10 @@ class ForestAnalysis:
         )
 
     def shutdown_routine(self, *args):
-        """Executes the operations before killing the mission analysis procedures"""
-        path = "/home/ori/git/digiforest_drs/trees/logs/raw/"
+        """Executes the operations before killing the mission analysis procedures"""       
+        path = f"{self.base_output_path}/trees/logs/raw/"
+        os.makedirs(path, exist_ok=True)
+
         # for tree in self._tree_manager.trees:
         #     # write tree as pickle
         #     with open(path + f"tree{str(tree.id).zfill(3)}.pkl", "wb") as file:
@@ -633,6 +642,7 @@ class TreeManager:
         terrain_confidence_sensor_weight: float = 0.9999,
         terrain_use_embree: bool = True,
         generate_canopy_mesh: bool = True,
+        output_path: str = "/tmp"
     ) -> None:
         """constructor of the TreeManager class
 
@@ -669,6 +679,7 @@ class TreeManager:
         self.terrain_confidence_sensor_weight = terrain_confidence_sensor_weight
         self.use_embree = terrain_use_embree
         self.generate_canopy_mesh = generate_canopy_mesh
+        self.base_output_path = output_path
 
         self.tree_reco_flags: List[List[bool]] = []
         self.tree_coverage_angles: List[float] = []
@@ -990,7 +1001,7 @@ class TreeManager:
         }
 
         with open(
-            f"/home/ori/git/digiforest_drs/terrains/terrain_{time_stamp.to_nsec()}.pkl",
+            f"{self.base_output_path}/output/terrains/terrain_{time_stamp.to_nsec()}.pkl",
             "wb",
         ) as file:
             pickle.dump(retval, file)
@@ -1169,9 +1180,9 @@ class TreeManager:
             saved.
         """
         if not os.path.exists(os.path.join(path, "csv")):
-            os.makedirs(os.path.join(path, "csv"))
+            os.makedirs(os.path.join(path, "csv"), exist_ok=True)
         if not os.path.exists(os.path.join(path, "xlsx")):
-            os.makedirs(os.path.join(path, "xlsx"))
+            os.makedirs(os.path.join(path, "xlsx"), exist_ok=True)
         file_name = (
             "TreeManagerState_"
             + f"{self._last_cluster_time.secs}_{self._last_cluster_time.nsecs}"
