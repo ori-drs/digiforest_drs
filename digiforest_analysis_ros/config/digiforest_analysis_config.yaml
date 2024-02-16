@@ -12,6 +12,7 @@ topic:
   stem_meshes: "/digiforest_forest_analysis/stem_meshes"
   canopy_meshes: "/digiforest_forest_analysis/canopy_meshes"
   terrain_model: "/digiforest_forest_analysis/terrain_model"
+  tree_point_clouds: "digiforest_forest_analysis/tree_point_clouds"
 
 tree_manager:
   distance_threshold: 0.5

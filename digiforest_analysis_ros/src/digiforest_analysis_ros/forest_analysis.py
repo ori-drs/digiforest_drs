@@ -102,6 +102,9 @@ class ForestAnalysis:
         self._terrain_topic = rospy.get_param(
             "~topic/terrain_model", "/digiforest_forest_analysis/terrain"
         )
+        self._tree_point_clouds_topic = rospy.get_param(
+            "~topic/tree_point_clouds", "digiforest_forest_analysis/tree_point_clouds"
+        )
 
         # Tree Manager
         self._distance_threshold = rospy.get_param(
@@ -222,6 +225,9 @@ class ForestAnalysis:
         self._pub_canopy_meshes = rospy.Publisher(
             self._canopy_meshes_topic, MarkerArray, queue_size=1, latch=True
         )
+        self._pub_tree_clusters = rospy.Publisher(
+            self._tree_point_clouds_topic, PointCloud2, queue_size=1, latch=True
+        )
         self._pub_cluster_labels = rospy.Publisher(
             "/digiforest_forest_analysis/debug/cluster_labels",
             MarkerArray,
@@ -230,12 +236,6 @@ class ForestAnalysis:
         )
         self._pub_cropped_pc = rospy.Publisher(
             "/digiforest_forest_analysis/debug/cropped_pc",
-            PointCloud2,
-            queue_size=1,
-            latch=True,
-        )
-        self._pub_tree_clusters = rospy.Publisher(
-            "/digiforest_forest_analysis/debug/tree_clusters",
             PointCloud2,
             queue_size=1,
             latch=True,
