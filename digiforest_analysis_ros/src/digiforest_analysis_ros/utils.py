@@ -92,6 +92,10 @@ def clustering_worker_fun(
             center_index_found = True
             break
     if not center_index_found:
+        print("\n pose_graph stamps:")
+        print(pose_graph_stamps)
+        print("\n path stamps:")
+        print([p.header.stamp for p in path_odom.poses])
         rospy.logerr("Could not find any cloud's stamp in posegraph")
         return
 

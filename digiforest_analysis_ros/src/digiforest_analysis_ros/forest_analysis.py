@@ -225,8 +225,8 @@ class ForestAnalysis:
         self._sub_payload_info = message_filters.Subscriber(
             self._payload_path_topic, Path
         )
-        self._path_cloud_synchronizer = message_filters.TimeSynchronizer(
-            [self._sub_payload_cloud, self._sub_payload_info], 10
+        self._path_cloud_synchronizer = message_filters.ApproximateTimeSynchronizer(
+            [self._sub_payload_cloud, self._sub_payload_info], 10, 0.5
         )
         self._path_cloud_synchronizer.registerCallback(self.payload_with_path_callback)
 
@@ -379,6 +379,8 @@ class ForestAnalysis:
         self, result, path_odom: np.ndarray, pc_counter: int
     ):
         print("clustering worker finished callback")
+        if result is None:
+            return
         clusters, terrain = result
         with timer("cwc"):
             with timer("cwc/publishing_clustering"):

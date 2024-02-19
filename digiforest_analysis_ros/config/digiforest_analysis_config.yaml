@@ -1,4 +1,4 @@
-debug_level: 0
+debug_level: 1
 
 id:
   base_frame: "base_vilens_optimized"
@@ -16,8 +16,8 @@ topic:
 
 tree_manager:
   distance_threshold: 0.5
-  reco_min_angle_coverage: 180
-  reco_min_distance: 4.0
+  reco_min_angle_coverage: 120
+  reco_min_distance: 10.0
 
 terrain:
   enabled: True
