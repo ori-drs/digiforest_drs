@@ -140,6 +140,9 @@ class ForestAnalysis:
         self._terrain_confidence_sensor_weight = rospy.get_param(
             "~tree_manager/confidence_sensor_weight", 0.9999
         )
+        self._tree_labels_topic = rospy.get_param(
+            "~tree_manager/tree_labels", "/digiforest_forest_analysis/tree_labels"
+        )
         self._terrain_use_embree = rospy.get_param("~tree_manager/use_embree", True)
 
         # Terrain Fitting
@@ -247,10 +250,7 @@ class ForestAnalysis:
             self._tree_point_clouds_topic, PointCloud2, queue_size=1, latch=True
         )
         self._pub_cluster_labels = rospy.Publisher(
-            "/digiforest_forest_analysis/debug/cluster_labels",
-            MarkerArray,
-            queue_size=1,
-            latch=True,
+            self._tree_labels_topic, MarkerArray, queue_size=1, latch=True
         )
         self._pub_cropped_pc = rospy.Publisher(
             "/digiforest_forest_analysis/debug/cropped_pc",
