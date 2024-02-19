@@ -123,6 +123,9 @@ class ForestAnalysis:
         self._tree_point_clouds_topic = rospy.get_param(
             "~topic/tree_point_clouds", "digiforest_forest_analysis/tree_point_clouds"
         )
+        self._tree_labels_topic = rospy.get_param(
+            "~topic/tree_labels", "/digiforest_forest_analysis/tree_labels"
+        )
 
         # Tree Manager
         self._distance_threshold = rospy.get_param(
@@ -139,9 +142,6 @@ class ForestAnalysis:
         )
         self._terrain_confidence_sensor_weight = rospy.get_param(
             "~tree_manager/confidence_sensor_weight", 0.9999
-        )
-        self._tree_labels_topic = rospy.get_param(
-            "~tree_manager/tree_labels", "/digiforest_forest_analysis/tree_labels"
         )
         self._terrain_use_embree = rospy.get_param("~tree_manager/use_embree", True)
 
