@@ -237,6 +237,7 @@ class Circle:
     def from_cloud_bullock(
         cls,
         points: np.ndarray,
+        fixed_radius: float = None,
         circle_height: float = 0.0,
         **kwargs,
     ) -> "Circle":
@@ -250,30 +251,38 @@ class Circle:
         Returns:
             Circle: fitted circle
         """
-        # normaliye points
-        points_mean = np.mean(points, axis=0)
-        u = points[:, 0] - points_mean[0]
-        v = points[:, 1] - points_mean[1]
-        # pre-calculate summands
-        S_uu = np.sum(np.power(u, 2))
-        S_vv = np.sum(np.power(v, 2))
-        S_uv = np.sum(u * v)
-        S_uuu_uvv = np.sum(np.power(u, 3) + u * np.power(v, 2))
-        S_vvv_vuu = np.sum(np.power(v, 3) + v * np.power(u, 2))
+        if fixed_radius is None:
+            # normalize points
+            points_mean = np.mean(points, axis=0)
+            u = points[:, 0] - points_mean[0]
+            v = points[:, 1] - points_mean[1]
+            # pre-calculate summands
+            S_uu = np.sum(np.power(u, 2))
+            S_vv = np.sum(np.power(v, 2))
+            S_uv = np.sum(u * v)
+            S_uuu_uvv = np.sum(np.power(u, 3) + u * np.power(v, 2))
+            S_vvv_vuu = np.sum(np.power(v, 3) + v * np.power(u, 2))
 
-        # calculate circle center in normalized coordinates and radius
-        v_c = (S_uuu_uvv / (2 * S_uu) - S_vvv_vuu / (2 * S_uv)) / (
-            S_uv / S_uu - S_vv / S_uv + 1e-12
-        )
-        u_c = (S_uuu_uvv / (2 * S_uv) - S_vvv_vuu / (2 * S_vv)) / (
-            S_uu / S_uv - S_uv / S_vv + 1e-12
-        )
-        r = np.sqrt(
-            np.power(u_c, 2) + np.power(v_c, 2) + (S_uu + S_vv) / points.shape[0]
-        )
-        # denormalize
-        x_c, y_c = points_mean[0] + u_c, points_mean[1] + v_c
-        return cls((x_c, y_c, circle_height), r)
+            # calculate circle center in normalized coordinates and radius
+            v_c = (S_uuu_uvv / (2 * S_uu) - S_vvv_vuu / (2 * S_uv)) / (
+                S_uv / S_uu - S_vv / S_uv + 1e-12
+            )
+            u_c = (S_uuu_uvv / (2 * S_uv) - S_vvv_vuu / (2 * S_vv)) / (
+                S_uu / S_uv - S_uv / S_vv + 1e-12
+            )
+            r = np.sqrt(
+                np.power(u_c, 2) + np.power(v_c, 2) + (S_uu + S_vv) / points.shape[0]
+            )
+            # denormalize
+            x_c, y_c = points_mean[0] + u_c, points_mean[1] + v_c
+            return cls((x_c, y_c, circle_height), r)
+        else:
+            r = fixed_radius
+            A = np.hstack([2 * points, np.ones((points.shape[0], 1))])
+            b = np.sum(np.power(points, 2), axis=1) - np.power(r, 2)
+            c = np.linalg.lstsq(A, b, rcond=None)[0]
+            x_c, y_c = c[:2]
+            return cls((x_c, y_c, circle_height), r)
 
     @classmethod
     def from_cloud_ransac(
@@ -718,6 +727,9 @@ class Tree:
         self.num_clusters_after_last_reco = 0
         self.cosys_changed_after_last_reco = False
 
+        self.hue = np.random.rand()
+        self.dbh = None
+
     def add_cluster(self, cluster: dict):
         self.clusters.append(cluster)
 
@@ -798,6 +810,44 @@ class Tree:
         if self.reconstructed:
             for i in range(len(self.circles)):
                 self.circles[i].apply_transform(translation, rotation)
+
+    def evaluate_at_height(self, height: float):
+        circ_interp = None
+        if not self.reconstructed:
+            return circ_interp
+
+        # extrapolate up to one slice interval under first slice
+        first_frustum_height = self.circles[1].center[2] - self.circles[0].center[2]
+        if -first_frustum_height < height - self.circles[0].center[2] < 0:
+            alpha = (self.circles[0].center[2] - height) / first_frustum_height
+            center = self.circles[0].center + alpha * (
+                self.circles[0].center - self.circles[1].center
+            )
+            radius = self.circles[0].radius + alpha * (
+                self.circles[0].radius - self.circles[1].radius
+            )
+            if np.any(np.isnan(center)) or np.isnan(radius):
+                return None
+            return Circle(center, radius)
+
+        # interpolate elsewhere
+        for i_circ in range(len(self.circles) - 1):
+            if (
+                height < self.circles[i_circ + 1].center[2]
+                and height > self.circles[i_circ].center[2]
+            ):
+                alpha = (height - self.circles[i_circ].center[2]) / (
+                    self.circles[i_circ + 1].center[2] - self.circles[i_circ].center[2]
+                )
+                center = (1 - alpha) * self.circles[
+                    i_circ
+                ].center + alpha * self.circles[i_circ + 1].center
+                radius = (1 - alpha) * self.circles[
+                    i_circ
+                ].radius + alpha * self.circles[i_circ + 1].radius
+                if np.any(np.isnan(center)) or np.isnan(radius):
+                    return None
+                return Circle(center, radius)
 
     def apply_transform(self, translation: np.ndarray, rotation: np.ndarray):
         """applies the transform to all member objects of this tree.
@@ -992,12 +1042,14 @@ class Tree:
             self.transform_circles(center, rot_mat)
             return True
 
-    def reconstruct2(
+    def reconstruct2(  # noqa: C901
         self,
         max_height: float = None,
         slice_heights: Union[float, Iterable] = 1.0,
         slice_thickness: float = 0.2,
         max_center_deviation: float = 0.1,
+        force_straight: bool = False,
+        max_radius: float = np.inf,
     ):
         circle_stack = []
         cluster_points_map = [
@@ -1032,11 +1084,18 @@ class Tree:
             scores = []
             point_counts = []
             debug_slice_points = []
-
-            if len(init_candidates) < num_init_candidates:
+            if len(circle_stack) == 0:
                 center_region = None
+                radius_lb = 0.5 * self.axis["radius"]
+                radius_ub = min(
+                    3 * self.axis["radius"], max_radius if max_radius else np.inf
+                )
             else:
                 center_region = Circle(circle_stack[-1].center, max_center_deviation)
+                radius_lb = 0.9 * circle_stack[-1].radius
+                radius_ub = min(
+                    1.05 * circle_stack[-1].radius, max_radius if max_radius else np.inf
+                )
 
             for i_cluster, cluster_points in enumerate(cluster_points_upright):
                 # print(f"Cluster Number {i_cluster}")
@@ -1049,49 +1108,28 @@ class Tree:
                 debug_slice_points.append(slice_points)
                 if len(slice_points) < 10:
                     continue
-                min_radius = 0.75 * self.axis["radius"]
-                max_radius = 1.5 * self.axis["radius"]
+
                 ransahc_circle = Circle.from_cloud_ransahc(
                     slice_points,
-                    min_radius,
-                    max_radius,
+                    radius_lb,
+                    radius_ub,
                     center_region,
                     circle_height=slice_height,
                 )
                 if ransahc_circle is None:
                     continue
-
-                # from matplotlib import pyplot as plt
-                # import colorsys
-                # fig, ax = plt.subplots()
-                # ax.set_aspect("equal", adjustable="box")
-                # ax.set_xlabel("x")
-                # ax.set_ylabel("y")
-                # color = [0.80, 0.2, 0]
-                # ax.scatter(
-                #     slice_points[:, 0],
-                #     slice_points[:, 1],
-                #     c=[color] * len(slice_points),
-                #     s=2,
-                # )
-                # ax.add_artist(
-                #     plt.Circle(
-                #         (ransahc_circle.x, ransahc_circle.y),
-                #         ransahc_circle.radius,
-                #         color=color,
-                #         fill=False,
-                #     )
-                # )
-                # ax.scatter([0], [0], c="black", s=10)
-                # # fig.show()
-                # plt.show()
-
                 ransahc_circles.append(ransahc_circle)
-                dists = ransahc_circle.get_distance(slice_points)
-                score = np.sum(np.abs(dists) < 0.1 * ransahc_circle.radius) / np.sum(
-                    dists < 0.1 * ransahc_circle.radius
+
+                dists_center = np.linalg.norm(
+                    slice_points[:, :2] - ransahc_circle.center[:2], axis=1
                 )
-                point_count = np.sum(np.abs(dists) < 0.1 * ransahc_circle.radius)
+                dists_circle = np.abs(dists_center - ransahc_circle.radius)
+
+                score = np.sum(dists_circle < 0.05 * ransahc_circle.radius) / np.sum(
+                    dists_center < 1.05 * ransahc_circle.radius
+                )
+
+                point_count = np.sum(dists_circle < 0.05 * ransahc_circle.radius)
                 scores.append(score)
                 point_counts.append(point_count)
 
@@ -1105,7 +1143,38 @@ class Tree:
                 fail_counter += 1
                 continue
 
-            fail_counter = 0
+            if np.mean(scores) < 0.33333:
+                fail_counter += 1
+                i_slice_height += 1
+                continue
+
+            # from matplotlib import pyplot as plt
+            # import colorsys
+            # fig, ax = plt.subplots()
+            # ax.set_aspect("equal", adjustable="box")
+            # ax.set_xlabel("x")
+            # ax.set_ylabel("y")
+            # ax.set_title(f"Slice at height {slice_height:.2f} m")
+            # hues = np.linspace(0, 1, len(debug_slice_points))
+            # for points, circle, hue in zip(debug_slice_points, ransahc_circles, hues):
+            #     color = colorsys.hls_to_rgb(hue, 0.45, 0.8)
+            #     ax.scatter(
+            #         points[:, 0],
+            #         points[:, 1],
+            #         c=[color] * len(points),
+            #         s=1,
+            #     )
+            #     ax.add_artist(
+            #         plt.Circle(
+            #             (circle.x, circle.y),
+            #             circle.radius,
+            #             color=color,
+            #             fill=False,
+            #         )
+            #     )
+            # ax.scatter([0], [0], c="black", s=10)
+            # fig.show()
+            # plt.show()
 
             if len(circle_stack) == 0:
                 if len(init_candidates) == 0:
@@ -1147,12 +1216,17 @@ class Tree:
                             weights=init_candidate["scores"][mask],
                             axis=0,
                         )
+                        total_point_count = np.sum(init_candidate["point_counts"][mask])
                         init_circles.append(Circle(average_center, average_radius))
-                        init_scores.append(np.mean(init_candidate["scores"][mask]))
+                        init_scores.append(
+                            np.mean(init_candidate["scores"][mask]) * total_point_count
+                        )
                     # add the best candidate to the stack
                     circle_stack.append(init_circles[np.argmax(init_scores)])
+                    # print(f"found init, using {np.argmax(init_scores)}")
                     i_slice_height += 1
             else:
+                # aggregate models
                 average_center = np.average(
                     [c.center for c in ransahc_circles], weights=scores, axis=0
                 )
@@ -1160,19 +1234,364 @@ class Tree:
                     [c.radius for c in ransahc_circles], weights=scores, axis=0
                 )
                 average_circle = Circle(average_center, average_radius)
+                # mean_r_prev_3 = np.mean([c.radius for c in circle_stack[-3:]], axis=0)
+                # if average_circle.radius > mean_r_prev_3:
+                #     fail_counter += 1
+                #     average_circle.radius = mean_r_prev_3
+
                 circle_stack.append(average_circle)
                 i_slice_height += 1
+            fail_counter = 0
 
         if len(circle_stack) < 2:
             self.reconstructed = False
             return False
-        else:
-            self.circles = circle_stack
-            self.reconstructed = True
-            self.transform_circles(
-                self.axis["transform"][:3, 3], self.axis["transform"][:3, :3]
+
+        if force_straight:
+            connecting_vecs = np.diff([c.center for c in circle_stack], axis=0)
+            connecting_vecs = (
+                connecting_vecs / np.linalg.norm(connecting_vecs, axis=1)[:, None]
             )
-            return True
+            mean_dir = np.mean(connecting_vecs, axis=0)
+            for circle in circle_stack:
+                alpha = circle.center[2] / mean_dir[2]
+                circle.center = circle_stack[0].center + mean_dir * alpha
+        self.circles = circle_stack
+        self.reconstructed = True
+        self.transform_circles(
+            self.axis["transform"][:3, 3], self.axis["transform"][:3, :3]
+        )
+        return True
+
+    def _filter_slice(
+        self,
+        sliced_clusters,
+        radius_lb,
+        radius_ub,
+        center_region,
+        slice_height,
+        filter_radius,
+    ):
+        ransahc_circles = []
+        scores = []
+        point_counts = []
+        remove_inds = []
+        for i_cluster, points in enumerate(sliced_clusters):
+            # too few points
+            if len(points) < 10:
+                remove_inds.append(i_cluster)
+                continue
+
+            # fit circle
+            ransahc_circle = Circle.from_cloud_ransahc(
+                points,
+                radius_lb,
+                radius_ub,
+                center_region,
+                circle_height=slice_height,
+            )
+            if ransahc_circle is None:
+                remove_inds.append(i_cluster)
+                continue  # no fit found
+            ransahc_circles.append(ransahc_circle)
+
+            # compute fitness score for circle fit
+            dists_center = np.linalg.norm(
+                points[:, :2] - ransahc_circle.center[:2], axis=1
+            )
+            dists_circle = np.abs(dists_center - ransahc_circle.radius)
+            score = np.sum(dists_circle < 0.05 * ransahc_circle.radius) / np.sum(
+                dists_center < 1.05 * ransahc_circle.radius
+            )
+            scores.append(score)
+            point_count = np.sum(dists_circle < 0.05 * ransahc_circle.radius)
+            point_counts.append(point_count)
+        for i in remove_inds[::-1]:
+            sliced_clusters.pop(i)
+
+        # no fit found
+        if len(ransahc_circles) == 0:
+            return None
+
+        # bad fit
+        if np.mean(scores) < 0.33333 or np.sum(scores) < 1e-12:
+            return None
+
+        # filter points using the ransahc circle
+        remove_inds = []
+        for i_cluster in range(len(sliced_clusters)):
+            ransahc_circle: Circle = ransahc_circles[i_cluster]
+            filter_mask = (
+                ransahc_circle.get_distance(sliced_clusters[i_cluster]) < filter_radius
+            )
+            pc_filtered = sliced_clusters[i_cluster][filter_mask]
+            if len(pc_filtered) < 10:
+                remove_inds.append(i_cluster)
+            sliced_clusters[i_cluster] = pc_filtered
+        for i in remove_inds[::-1]:
+            sliced_clusters.pop(i)
+            ransahc_circles.pop(i)
+            scores.pop(i)
+            point_counts.pop(i)
+        if len(sliced_clusters) == 0:
+            return None  # no slices left
+        if np.sum(point_counts) < 10:
+            return None  # to few points left for fitting
+
+        return {
+            "ransahc_circles": ransahc_circles,
+            "scores": np.array(scores),
+            "point_counts": np.array(point_counts),
+            "filtered_points": deepcopy(sliced_clusters),
+        }
+
+    def reconstruct3(  # noqa: C901
+        self,
+        max_height: float = None,
+        slice_heights: Union[float, Iterable] = 1.0,
+        slice_thickness: float = 0.2,
+        max_center_deviation: float = 0.1,
+        force_straight: bool = False,
+        max_radius: float = np.inf,
+        filter_radius: float = 0.05,
+    ):
+        circle_stack = []
+        cluster_points_map = [
+            cluster["cloud"].point.positions.numpy()
+            @ cluster["info"]["T_sensor2map"][:3, :3].T
+            + cluster["info"]["T_sensor2map"][:3, 3]
+            for cluster in self.clusters
+        ]
+        cluster_points_upright = [
+            (points - self.axis["transform"][:3, 3]) @ self.axis["transform"][:3, :3]
+            for points in cluster_points_map
+        ]
+        if type(slice_heights) == float:
+            min_point = np.min([cpu.min() for cpu in cluster_points_upright])
+            max_point = np.max([cpu.max() for cpu in cluster_points_upright])
+            slice_heights = np.arange(
+                min_point,
+                max_height if max_height is not None else max_point,
+                slice_heights,
+            )
+            if len(slice_heights) < 3:
+                return False  # too few slices
+
+        fail_counter = 0  # counts how many slices failed to fit a circle
+        init_candidates = []
+        num_init_candidates = 3
+        i_slice_height = 0
+
+        while i_slice_height < len(slice_heights):  # len of slice_heights is changed
+            slice_height = slice_heights[i_slice_height]
+            if fail_counter == 5:
+                break
+
+            # determine boundary conditions for ransahc fits
+            if len(circle_stack) == 0:
+                center_region = None
+                radius_lb = 0.5 * self.axis["radius"]
+                radius_ub = min(
+                    3 * self.axis["radius"], max_radius if max_radius else np.inf
+                )
+            else:
+                center_region = Circle(circle_stack[-1].center, max_center_deviation)
+                radius_lb = 0.9 * circle_stack[-1].radius
+                radius_ub = min(
+                    1.05 * circle_stack[-1].radius, max_radius if max_radius else np.inf
+                )
+
+            # slice clusters
+            sliced_clusters = [
+                cluster_points[
+                    np.logical_and(
+                        cluster_points[:, 2] >= slice_height - slice_thickness / 2,
+                        cluster_points[:, 2] < slice_height + slice_thickness / 2,
+                    )
+                ]
+                for cluster_points in cluster_points_upright
+            ]
+
+            # try to fit hough circles to the slices
+            slice_circles = self._filter_slice(
+                sliced_clusters,
+                radius_lb,
+                radius_ub,
+                center_region,
+                slice_height,
+                filter_radius,
+            )
+            if slice_circles is None:
+                fail_counter += 1
+                i_slice_height += 1
+                continue
+
+            # fit bulloc circles with fixed radius of mean ransahc circles
+            weights = slice_circles["scores"] * slice_circles["point_counts"]
+            if np.sum(weights) < 1e-12:
+                fail_counter += 1
+                i_slice_height += 1
+                continue
+            average_radius = np.average(
+                [c.radius for c in slice_circles["ransahc_circles"]], weights=weights
+            )
+            slice_circles["bullock_circles"] = [
+                Circle.from_cloud_bullock(
+                    pc, fixed_radius=average_radius, circle_height=slice_height
+                )
+                for pc in slice_circles["filtered_points"]
+            ]
+
+            # from matplotlib import pyplot as plt
+            # import colorsys
+
+            # fig, ax = plt.subplots()
+            # ax.set_aspect("equal", adjustable="box")
+            # ax.set_xlabel("x")
+            # ax.set_ylabel("y")
+            # ax.set_title(f"Slice at height {slice_height:.2f} m")
+            # hues = np.linspace(0, 1, len(slice_circles["filtered_points"]))
+            # for points, circle, hue in zip(
+            #     slice_circles["filtered_points"], slice_circles["bullock_circles"], hues
+            # ):
+            #     color = colorsys.hls_to_rgb(hue, 0.45, 0.8)
+            #     ax.scatter(
+            #         points[:, 0],
+            #         points[:, 1],
+            #         c=[color] * len(points),
+            #         s=1,
+            #     )
+            #     ax.add_artist(
+            #         plt.Circle(
+            #             (circle.x, circle.y),
+            #             circle.radius,
+            #             color=color,
+            #             fill=False,
+            #         )
+            #     )
+            # ax.scatter([0], [0], c="black", s=10)
+            # fig.show()
+            # plt.show()
+
+            # shift all circles to using the bulloc circles
+            mean_center = np.mean(
+                np.vstack([c.center for c in slice_circles["bullock_circles"]]), axis=0
+            )
+            shifts = mean_center - np.vstack(
+                [c.center for c in slice_circles["bullock_circles"]]
+            )
+            for i in range(len(slice_circles["filtered_points"])):
+                slice_circles["filtered_points"][i] += shifts[i]
+
+            # fit final bullock circle
+            points = np.vstack(slice_circles["filtered_points"])
+            slice_circles["final_circle"] = Circle.from_cloud_bullock(
+                points, circle_height=slice_height
+            )
+            if np.any(np.isnan(slice_circles["final_circle"].center)):
+                fail_counter += 1
+                i_slice_height += 1
+                continue
+            if slice_circles["final_circle"].radius > max_radius:
+                fail_counter += 1
+                i_slice_height += 1
+                continue
+
+            # from matplotlib import pyplot as plt
+            # import colorsys
+
+            # fig, ax = plt.subplots()
+            # ax.set_aspect("equal", adjustable="box")
+            # ax.set_xlabel("x")
+            # ax.set_ylabel("y")
+            # ax.set_title(f"Slice at height {slice_height:.2f} m")
+            # points = np.vstack(slice_circles["filtered_points"])
+            # ax.scatter(
+            #     points[:, 0],
+            #     points[:, 1],
+            #     s=1,
+            # )
+            # ax.add_artist(
+            #     plt.Circle(
+            #         (slice_circles["final_circle"].x, slice_circles["final_circle"].y),
+            #         slice_circles["final_circle"].radius,
+            #         color="r",
+            #         fill=False,
+            #     )
+            # )
+            # ax.scatter([0], [0], c="black", s=10)
+            # fig.show()
+            # plt.show()
+
+            if len(circle_stack) == 0:
+                if len(init_candidates) == 0:
+                    if i_slice_height == len(slice_heights) - 1:
+                        return False  # no init can be found, too few good slices
+                    # add additional slice heights for NMS candidates here
+                    candidate_heights = np.linspace(
+                        slice_heights[i_slice_height],
+                        slice_heights[i_slice_height + 1],
+                        num_init_candidates + 1,
+                    )[1:-1]
+                    for candidate_height in candidate_heights[::-1]:
+                        slice_heights = np.insert(
+                            slice_heights, i_slice_height + 1, candidate_height
+                        )
+                if len(init_candidates) < num_init_candidates:
+                    # aggregate results
+                    init_candidates.append(
+                        {
+                            "circle": slice_circles["final_circle"],
+                            "scores": slice_circles["scores"],
+                            "point_counts": slice_circles["point_counts"],
+                        }
+                    )
+                    i_slice_height += 1
+                if len(init_candidates) == num_init_candidates:
+                    init_circles = []
+                    init_scores = []
+                    # evaluate results aka supress non-maxima
+                    for init_candidate in init_candidates:
+                        init_circles.append(slice_circles["final_circle"])
+                        init_scores.append(
+                            np.mean(
+                                init_candidate["scores"]
+                                * init_candidate["point_counts"]
+                            )
+                        )
+                    # add the best candidate to the stack
+                    circle_stack.append(init_circles[np.argmax(init_scores)])
+                    # print(f"found init, using {np.argmax(init_scores)}")
+                    i_slice_height += 1
+            else:
+                # mean_r_prev_3 = np.mean([c.radius for c in circle_stack[-3:]], axis=0)
+                # if average_circle.radius > mean_r_prev_3:
+                #     fail_counter += 1
+                #     average_circle.radius = mean_r_prev_3
+
+                circle_stack.append(slice_circles["final_circle"])
+                i_slice_height += 1
+            fail_counter = 0
+
+        if len(circle_stack) < 2:
+            self.reconstructed = False
+            return False
+
+        if force_straight:
+            connecting_vecs = np.diff([c.center for c in circle_stack], axis=0)
+            connecting_vecs = (
+                connecting_vecs / np.linalg.norm(connecting_vecs, axis=1)[:, None]
+            )
+            mean_dir = np.mean(connecting_vecs, axis=0)
+            for circle in circle_stack:
+                alpha = circle.center[2] / mean_dir[2]
+                circle.center = circle_stack[0].center + mean_dir * alpha
+        self.circles = circle_stack
+        self.reconstructed = True
+        self.transform_circles(
+            self.axis["transform"][:3, 3], self.axis["transform"][:3, :3]
+        )
+        return True
 
     def generate_mesh(self) -> Tuple[np.ndarray, np.ndarray]:
         """generates a mesh for the tree by connecting the circles with cone frustums
@@ -1211,7 +1630,6 @@ class Tree:
         # filter out points close to floor (by map z axis)
         canopy_points = self.points[self.points[:, 2] > 2.0]
         if len(canopy_points) < 10:
-            print("no more points")
             return False
         # filter out points close to reconstruction
         axis = np.concatenate(
@@ -1235,8 +1653,21 @@ class Tree:
             "tris": hull.triangle.indices.numpy(),
         }
 
+    def compute_dbh(self, terrain_height):
+        reco_dbh = None
+        query_height = terrain_height + 1.3
+        dbh_circle = self.evaluate_at_height(query_height)
+        if dbh_circle is not None:
+            reco_dbh = dbh_circle.radius * 2
+            self.dbh = reco_dbh
+
     def __str__(self) -> str:
         if self.circles is not None:
             return f"Tree {self.id} with {len(self.circles)} circles and {len(self.clusters)} clusters"
         else:
             return f"Tree {self.id} with no circles and {len(self.clusters)} clusters"
+
+    def __setstate__(self, state):
+        if "dbh" not in state:
+            state["dbh"] = None
+        self.__dict__.update(state)
