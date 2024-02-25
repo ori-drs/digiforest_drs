@@ -15,6 +15,7 @@ from scipy.stats import multivariate_normal
 from typing import List, Tuple
 from threading import Lock
 from multiprocessing.pool import ThreadPool
+from scipy.interpolate import RegularGridInterpolator
 
 import rospkg
 import rospy
@@ -44,7 +45,7 @@ np.seterr(divide="ignore", invalid="ignore")
 
 # cd ~/catkin_ws/src/vilens_config/vc_stein_am_rhein/config/procman && rosrun procman_ros sheriff -l frontier.pmd
 # cd ~/logs/logs_evo_finland/exp01 && rosbag play frontier_2023-05-01-14-* --clock --pause --topics /hesai/pandar /alphasense_driver_ros/imu  -r 1
-# cd ~/logs/logs_stein_am_rhein/C3/ && rosbag play *.bag --clock --pause --topics /hesai/pandar /alphasense_driver_ros/imu  -r 1
+# cd ~/logs/logs_stein_am_rhein/C3/exp03 && rosbag play *.bag --clock --pause --topics /hesai/pandar /alphasense_driver_ros/imu  -r 1
 
 
 class ForestAnalysis:
@@ -560,27 +561,41 @@ class ForestAnalysis:
         ):
             if len(tree.clusters) < 3:
                 continue
-            label_texts.append(
+
+            if np.max(tree.points[:, 2]) - np.min(tree.points[:, 2]) < 5.0:
+                continue
+
+            label_text = (
                 f"##### tree{str(tree.id).zfill(3)} #####\n"
-                + f"angle:     {np.rad2deg(coverage_angle):.0f} deg\n"
-                + f"angle_flag:    {reco_flags['angle_flag']}\n"
-                + f"distance_flag:  {reco_flags['distance_flag']}\n"
+                # + f"angle:     {np.rad2deg(coverage_angle):.0f} deg\n"
+                # + f"angle_flag:    {reco_flags['angle_flag']}\n"
+                # + f"distance_flag:  {reco_flags['distance_flag']}\n"
+                + f"reconstructed: {tree.reconstructed}\n"
             )
+            if tree.dbh:
+                label_text += f"dbh:     {tree.dbh * 100:.1f} cm\n"
+            else:
+                label_text += f"dbh:    ({tree.axis['radius'] * 200:.1f}) cm\n"
+            label_texts.append(label_text)
             label_positions.append(tree.axis["transform"][:3, 3])
 
             verts, tris = tree.generate_mesh()
             mesh_messages.markers.append(
                 self.generate_mesh_msg(
-                    verts, tris, id=tree.id, frame_id=self._map_frame_id
+                    verts,
+                    tris,
+                    id=tree.id,
+                    frame_id=self._map_frame_id,
+                    color=[117 / 255, 49 / 255, 12 / 255],
                 )
             )
 
             # sample random hue and for all clusters random brighntess between 0.5 and 1
-            hue = np.random.rand()
-            lightness = [
-                np.random.rand() * 0.8 + 0.1 for _ in range(len(tree.clusters))
-            ]
-            tree_colors.extend([colorsys.hls_to_rgb(hue, l, 1.0) for l in lightness])
+            lightness = np.linspace(0.1, 0.9, len(tree.clusters))
+            lightness = np.random.permutation(lightness)
+            tree_colors.extend(
+                [colorsys.hls_to_rgb(tree.hue, l, 1.0) for l in lightness]
+            )
             # add voxel downsampled pcs to tree_clouds
             tree_clouds.extend(
                 [
@@ -600,7 +615,7 @@ class ForestAnalysis:
                     id=tree.id,
                     frame_id=self._map_frame_id,
                     color=[150 / 255, 217 / 255, 121 / 255],
-                    alpha=0.5,
+                    alpha=0.2,
                 )
                 canopy_messages.markers.append(message)
 
@@ -620,7 +635,7 @@ class ForestAnalysis:
                 tris,
                 frame_id=self._map_frame_id,
                 time_stamp=self.last_pc_header.stamp,
-                color=[0.5, 0.5, 0.5],
+                color=[156 / 255, 93 / 255, 59 / 255],
                 alpha=1.0,
                 id=0,
             )
@@ -708,6 +723,7 @@ class TreeManager:
         self._last_cluster_time = None
 
         self.terrains = []
+        self.terrain_interpolator = None
 
         self.capture_Ts_with_stamps: List[dict] = []
 
@@ -888,6 +904,13 @@ class TreeManager:
 
         # convert to vertices and triangles
         mgrid = np.stack((query_X, query_Y, heights), axis=2)
+        self.terrain_interpolator = RegularGridInterpolator(
+            points=(query_X[0, :], query_Y[:, 0]),
+            values=heights.T,
+            method="linear",
+            bounds_error=False,
+            fill_value=np.nan,
+        )
         verts, tris = meshgrid_to_mesh(mgrid)
 
         # remove verts with nan
@@ -1183,6 +1206,12 @@ class TreeManager:
                 tree.cosys_changed_after_last_reco = False
                 if self.generate_canopy_mesh:
                     tree.generate_canopy()
+                if self.terrain_interpolator:
+                    terrain_height = self.terrain_interpolator(
+                        tree.axis["transform"][:2, 3]
+                    )[0]
+                    if not np.isnan(terrain_height):
+                        tree.compute_dbh(terrain_height)
             reco_happened |= reco_sucess
 
         return reco_happened
