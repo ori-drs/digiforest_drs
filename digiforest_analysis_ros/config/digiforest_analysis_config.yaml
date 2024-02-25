@@ -1,4 +1,4 @@
-debug_level: 1
+debug_level: 0
 
 id:
   base_frame: "base_vilens_optimized"
