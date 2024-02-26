@@ -41,8 +41,7 @@ class Circle:
         min_radius: float = 0.05,
         max_radius: float = 0.5,
         point_ratio: float = 0.0,
-        previous_center: np.ndarray = None,
-        search_radius: float = None,
+        center_region: "Circle" = None,
         entropy_weighting: float = 10.0,
         circle_height: float = 0.0,
         return_pixels_and_votes: bool = False,
@@ -210,7 +209,9 @@ class Circle:
             hough_res /= penalty[:, None, None]
 
         # constrain circles to be roughly above previous one
-        if previous_center is not None and search_radius is not None:
+        if center_region is not None:
+            previous_center = center_region.center[:2]
+            search_radius = center_region.radius
             # calculate distance of every circle candidate center to the previous
             # center
             dist = np.sqrt(
@@ -288,16 +289,19 @@ class Circle:
     def from_cloud_ransac(
         cls,
         points: np.ndarray,
+        min_radius: float = 0.0,
+        max_radius: float = np.inf,
         n_iterations: int = 100,
-        n_points: int = 3,
-        n_inliers: int = 10,
+        min_n_inliers: int = 10,
+        center_region: "Circle" = None,
         inlier_threshold: float = 0.01,
         circle_height: float = 0.0,
+        sampling: str = "weighted",
         **kwargs,
     ) -> Tuple["Circle", np.ndarray]:
         """This function filters outliers using the RANSAC algorithm. It fits a
         circle to a random sample of n_points points and counts how many points are
-        inliers. If the number of inliers is larger than n_inliers, the circle is
+        inliers. If the number of inliers is larger than min_n_inliers, the circle is
         accepted and the number of inliers is updated. The algorithm is repeated
         n_iterations times.
 
@@ -305,7 +309,7 @@ class Circle:
             points (np.ndarray): N x 2 array of points in the slice
             n_iterations (int): Number of iterations to run the algorithm
             n_points (int): Number of points used to model the circle
-            n_inliers (int): Minimum number of inliers to accept the circle
+            min_n_inliers (int): Minimum number of inliers to accept the circle
             inlier_threshold (float): thickness of band around circle to qualify
                                     inliers
 
@@ -313,27 +317,62 @@ class Circle:
             tuple: best model Circle and inlier points if model was found, else None
         """
         best_model = None
-        best_inliers = None
-        for _ in range(n_iterations):
-            # randomly sample n_points from the points
-            sample = points[np.random.choice(points.shape[0], n_points, replace=False)]
-            # fit a circle to the sample
-            circle = cls.from_cloud_bullock(sample, circle_height)
-            # count how many points are inliers
-            dist = np.sqrt(
-                (points[:, 0] - circle.x) ** 2 + (points[:, 1] - circle.y) ** 2
+        points = points[:, :2]
+
+        if sampling == "weighted":
+            # construct weights by distance to closest neighbor i.e. local density
+            dist_to_closest_neighbor = cKDTree(points).query(points, k=2)[0][:, 1]
+            probas = np.exp(-dist_to_closest_neighbor)
+            probas -= probas.min() - 1e-12
+            probas /= probas.max()
+
+        N_circs = n_iterations
+
+        if sampling == "weighted":
+            indices = (
+                (1 - np.random.rand(N_circs, len(points)) * probas)
+            ).argpartition(3, axis=1)[:, :3]
+        elif sampling == "random":
+            indices = ((1 - np.random.rand(N_circs, len(points)))).argpartition(
+                3, axis=1
+            )[:, :3]
+        elif sampling == "full":
+            indices = np.array(list(product(range(len(points)), repeat=3)))
+            mask = np.logical_and(
+                indices[:, 0] != indices[:, 1],
+                indices[:, 0] != indices[:, 2],
+                indices[:, 1] != indices[:, 2],
             )
-            inliers = points[
-                np.logical_and(
-                    (circle.radius - inlier_threshold) < dist,
-                    dist < (circle.radius + inlier_threshold),
-                )
-            ]
-            if inliers.shape[0] > n_inliers:
-                best_model = deepcopy(circle)
-                best_inliers = inliers
-                n_inliers = inliers.shape[0]
-        return best_model, best_inliers
+            mask = np.logical_and(mask, indices[:, 1] != indices[:, 2])
+            indices = indices[mask]
+        else:
+            raise ValueError("sampling must be one of 'weighted', 'random', 'full'")
+
+        circle_points = points[indices]  # num_samples x 3 x 2
+
+        circle_points = points[indices]  # n_iters x 3 x 2
+        circles = cls.from_3_2d_points(circle_points, method="bisectors")  # n_iters x 3
+
+        circles = circles[circles[:, 2] < max_radius]
+        circles = circles[circles[:, 2] > min_radius]
+        if center_region is not None:
+            dists = np.linalg.norm(circles[:, :2] - center_region.center[:2], axis=1)
+            circles = circles[dists < center_region.radius]
+
+        dists = np.linalg.norm(points[None, ...] - circles[:, None, :2], axis=2).T
+        dists -= circles[:, 2][None, :]
+        inlier_mask = np.logical_and(
+            dists < inlier_threshold, dists > -inlier_threshold
+        )
+        n_inliers = np.sum(inlier_mask, axis=0)
+        circles = circles[n_inliers > min_n_inliers]
+        n_inliers = n_inliers[n_inliers > min_n_inliers]
+        if len(circles) == 0:
+            return None
+
+        best_model = circles[np.argmax(n_inliers)]
+        best_model = cls((best_model[0], best_model[1], circle_height), best_model[2])
+        return best_model
 
     @classmethod
     def from_cloud_ransahc(
@@ -1283,28 +1322,46 @@ class Tree:
                 continue
 
             # fit circle
-            ransahc_circle = Circle.from_cloud_ransahc(
+            # filter_circle = Circle.from_cloud_ransahc(
+            #     points,
+            #     min_radius=radius_lb,
+            #     max_radius=radius_ub,
+            #     center_region=center_region,
+            #     circle_height=slice_height,
+            # )
+            # filter_circle = Circle.from_cloud_hough(
+            #     points,
+            #     min_radius=radius_lb,
+            #     max_radius=radius_ub,
+            #     center_region=center_region,
+            #     entropy_weighting=0.0,
+            #     circle_height=slice_height,
+            # )
+            filter_circle = Circle.from_cloud_ransac(
                 points,
-                radius_lb,
-                radius_ub,
-                center_region,
                 circle_height=slice_height,
+                min_radius=radius_lb,
+                max_radius=radius_ub,
+                center_region=center_region,
+                sampling="random",
+                n_iterations=1000,
             )
-            if ransahc_circle is None:
+
+            if filter_circle is None:
                 remove_inds.append(i_cluster)
                 continue  # no fit found
-            ransahc_circles.append(ransahc_circle)
+            ransahc_circles.append(filter_circle)
 
             # compute fitness score for circle fit
             dists_center = np.linalg.norm(
-                points[:, :2] - ransahc_circle.center[:2], axis=1
+                points[:, :2] - filter_circle.center[:2], axis=1
             )
-            dists_circle = np.abs(dists_center - ransahc_circle.radius)
-            score = np.sum(dists_circle < 0.05 * ransahc_circle.radius) / np.sum(
-                dists_center < 1.05 * ransahc_circle.radius
+            dists_circle = np.abs(dists_center - filter_circle.radius)
+            score = np.sum(dists_circle < 0.05 * filter_circle.radius) / np.sum(
+                dists_center < 1.05 * filter_circle.radius
             )
             scores.append(score)
-            point_count = np.sum(dists_circle < 0.05 * ransahc_circle.radius)
+            point_count = np.sum(dists_circle < 0.05 * filter_circle.radius)
             point_counts.append(point_count)
         for i in remove_inds[::-1]:
             sliced_clusters.pop(i)
@@ -1320,9 +1377,9 @@ class Tree:
         # filter points using the ransahc circle
         remove_inds = []
         for i_cluster in range(len(sliced_clusters)):
-            ransahc_circle: Circle = ransahc_circles[i_cluster]
+            filter_circle: Circle = ransahc_circles[i_cluster]
             filter_mask = (
-                ransahc_circle.get_distance(sliced_clusters[i_cluster]) < filter_radius
+                filter_circle.get_distance(sliced_clusters[i_cluster]) < filter_radius
             )
             pc_filtered = sliced_clusters[i_cluster][filter_mask]
             if len(pc_filtered) < 10:
