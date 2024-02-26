@@ -19,12 +19,14 @@ from scipy.interpolate import RegularGridInterpolator
 
 import rospkg
 import rospy
+
 import tf2_ros
 from sensor_msgs.msg import PointCloud2, PointField
 from sensor_msgs import point_cloud2
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
 from nav_msgs.msg import Path
+from std_srvs.srv import Empty
 import message_filters
 from geometry_msgs.msg import PoseStamped
 import trimesh
@@ -66,6 +68,7 @@ class ForestAnalysis:
             self._reco_min_distance,
             self._clustering_crop_upper_bound,
             self._clustering_crop_lower_bound,
+            self._max_reco_diameter / 2,
             self._terrain_confidence_stds,
             self._terrain_confidence_sensor_weight,
             self._terrain_use_embree,
@@ -86,6 +89,7 @@ class ForestAnalysis:
         self.pc_counter = 0
         self.tree_manager_lock = Lock()
         self.pose_graph_stamps = []
+        self._posegraph_updates_active = True
 
         rospy.on_shutdown(self.shutdown_routine)
 
@@ -198,6 +202,7 @@ class ForestAnalysis:
         )
         self._fitting_n_threads = rospy.get_param("~fitting/n_threads", 1)
         self._generate_canopy_mesh = rospy.get_param("~fitting/generate_canopy", True)
+        self._max_reco_diameter = rospy.get_param("~fitting/max_reco_diameter", np.inf)
 
         # Internals
         self._tf_buffer = None
@@ -210,6 +215,26 @@ class ForestAnalysis:
         # listeners for transforms
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer)
+
+        # Services
+        self.export_tree_manager_service = rospy.Service(
+            "digiforest/export_tree_manager",
+            Empty,
+            lambda _: self.export_tree_manager(),
+        )
+
+        def toggle_loop_closure_callback(_):
+            self._posegraph_updates_active = not self._posegraph_updates_active
+            print(
+                "Posegraph Updates now active"
+                if self._posegraph_updates_active
+                else "Posegraph Updates now inactive"
+            )
+            return []
+
+        self.toggle_loop_closure_service = rospy.Service(
+            "digiforest/toggle_loop_closure", Empty, toggle_loop_closure_callback
+        )
 
         # # Subscribers
         # self._sub_payload_cloud = rospy.Subscriber(
@@ -382,9 +407,10 @@ class ForestAnalysis:
         print("clustering worker finished callback")
         if result is None:
             return
-        clusters, terrain = result
-        with timer("cwc"):
-            with timer("cwc/publishing_clustering"):
+        timer_cwc = Timer()
+        clusters, terrain, timer_cw = result
+        with timer_cwc("cwc"):
+            with timer_cwc("cwc/publishing_clustering"):
                 clouds = [
                     c["cloud"]
                     .clone()
@@ -398,7 +424,7 @@ class ForestAnalysis:
                     colors=[c["info"]["color"] for c in clusters],
                     frame_id=self._map_frame_id,
                 )
-            with timer("cwc/tree_manager"):
+            with timer_cwc("cwc/tree_manager"):
                 path_odom_pos = np.array(
                     [
                         [p.pose.position.x, p.pose.position.y, p.pose.position.z]
@@ -480,12 +506,12 @@ class ForestAnalysis:
                         self._terrain_cloth_cell_size,
                     )
 
-            with timer("cwc/publishing_tree_manager"):
+            with timer_cwc("cwc/publishing_tree_manager"):
                 self.publish_tree_manager_state()
                 self._tree_manager.write_results(f"{self.base_output_path}/trees/logs")
 
             if self._debug_level > 1:
-                with timer("cwc/dumping_clusters"):
+                with timer_cwc("cwc/dumping_clusters"):
                     cluster_dir = os.path.join(
                         self.base_output_path, "trees", str(self.last_pc_header.stamp)
                     )
@@ -504,7 +530,10 @@ class ForestAnalysis:
                         ) as file:
                             pickle.dump(cluster, file)
 
-        rospy.loginfo(f"Finished processing payload cloud {pc_counter}:\n{timer}")
+        rospy.loginfo(
+            f"Finished processing payload cloud {pc_counter}\nTimings of Cluster Worker:\n{timer_cw}Timings of Cluster Worker Callback:\n{timer_cwc}"
+        )
+        self._tree_manager.add_timing_result({"cw": timer_cw, "cwc": timer_cwc})
 
     def payload_with_path_callback(self, cloud_odom: PointCloud2, path_odom: Path):
         self.pc_counter += 1
@@ -541,8 +570,10 @@ class ForestAnalysis:
         self.pose_graph_stamps = [
             pose.header.stamp for pose in posegraph_msg.path.poses
         ]
-        with self.tree_manager_lock:
-            self._tree_manager.update_poses(posegraph_msg.path.poses)
+
+        if self._posegraph_updates_active:
+            with self.tree_manager_lock:
+                self._tree_manager.update_poses(posegraph_msg.path.poses)
 
     def publish_tree_manager_state(self):
         label_texts = []
@@ -641,8 +672,7 @@ class ForestAnalysis:
             )
         )
 
-    def shutdown_routine(self, *args):
-        """Executes the operations before killing the mission analysis procedures"""
+    def export_tree_manager(self):
         path = os.path.join(self.base_output_path, "trees", "logs", "raw")
         print(f"Creating directory{path}")
         os.makedirs(path, exist_ok=True)
@@ -657,6 +687,9 @@ class ForestAnalysis:
         with open(os.path.join(path, "tree_manager.pkl"), "wb") as file:
             pickle.dump(self._tree_manager, file)
 
+    def shutdown_routine(self, *args):
+        """Executes the operations before killing the mission analysis procedures"""
+        self.export_tree_manager()
         self._clustering_pool.close()
         rospy.loginfo("Digiforest Analysis node stopped!")
 
@@ -669,6 +702,7 @@ class TreeManager:
         reco_min_distance: float = 4.0,
         crop_upper_bound: float = 1.0,
         crop_lower_bound: float = 3.0,
+        max_radius: float = np.inf,
         terrain_confidence_stds: list = [3, 10, 10],
         terrain_confidence_sensor_weight: float = 0.9999,
         terrain_use_embree: bool = True,
@@ -707,6 +741,7 @@ class TreeManager:
         self.reco_min_distance = reco_min_distance
         self.crop_upper_bound = crop_upper_bound
         self.crop_lower_bound = crop_lower_bound
+        self.max_radius = max_radius
         self.terrain_confidence_stds = terrain_confidence_stds
         self.terrain_confidence_sensor_weight = terrain_confidence_sensor_weight
         self.use_embree = terrain_use_embree
@@ -726,6 +761,7 @@ class TreeManager:
         self.terrain_interpolator = None
 
         self.capture_Ts_with_stamps: List[dict] = []
+        self.timing_results = []
 
     def _update_kd_tree(self):
         """Updates the KD tree with the current tree centers"""
@@ -832,6 +868,9 @@ class TreeManager:
             }
 
         self.add_clusters(clusters_base)
+
+    def add_timing_result(self, timer: dict):
+        self.timing_results.append(timer)
 
     def get_terrain(self) -> np.ndarray:
         """Returns the terrain of the entire map in a 2.5D meshgrid format.
@@ -1200,7 +1239,7 @@ class TreeManager:
             if self.debug_level > 0:
                 rospy.loginfo(f"Reconstructing tree {tree.id}")
 
-            reco_sucess = tree.reconstruct2()
+            reco_sucess = tree.reconstruct3(max_radius=self.max_radius)
             if reco_sucess:
                 tree.num_clusters_after_last_reco = len(tree.clusters)
                 tree.cosys_changed_after_last_reco = False

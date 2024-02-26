@@ -1488,11 +1488,20 @@ class Tree:
             slice_circles["final_circle"] = Circle.from_cloud_bullock(
                 points, circle_height=slice_height
             )
+
+            # reject bad fits
             if np.any(np.isnan(slice_circles["final_circle"].center)):
                 fail_counter += 1
                 i_slice_height += 1
                 continue
             if slice_circles["final_circle"].radius > max_radius:
+                fail_counter += 1
+                i_slice_height += 1
+                continue
+            if (
+                len(circle_stack)
+                and slice_circles["final_circle"].radius > 2 * circle_stack[-1].radius
+            ):
                 fail_counter += 1
                 i_slice_height += 1
                 continue

@@ -147,9 +147,7 @@ def clustering_worker_fun(
             clusters[i]["info"]["T_sensor2map"] = T_sensor2map
             clusters[i]["info"]["time_stamp"] = center_stamp
 
-    rospy.loginfo(f"Timing results of clustering:\n{timer}")
-
-    return clusters, terrain
+    return clusters, terrain, timer
 
 
 def apply_transform(

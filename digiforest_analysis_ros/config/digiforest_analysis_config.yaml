@@ -53,3 +53,4 @@ fitting:
   save_debug_results: False
   n_threads: 1  
   generate_canopy: True
+  max_diameter: 1.0
