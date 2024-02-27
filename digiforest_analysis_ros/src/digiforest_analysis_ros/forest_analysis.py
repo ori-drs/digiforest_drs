@@ -30,6 +30,7 @@ from std_srvs.srv import Empty
 import message_filters
 from geometry_msgs.msg import PoseStamped
 import trimesh
+import gc
 
 from digiforest_analysis.tasks.tree_reconstruction import Tree
 from digiforest_analysis.utils.timing import Timer
@@ -531,9 +532,10 @@ class ForestAnalysis:
                             pickle.dump(cluster, file)
 
         rospy.loginfo(
-            f"Finished processing payload cloud {pc_counter}\nTimings of Cluster Worker:\n{timer_cw}Timings of Cluster Worker Callback:\n{timer_cwc}"
+            f"Finished processing payload cloud {pc_counter}\nTimings of Cluster Worker (cw) and Cluster Worker Callback (cwc):\n{timer_cw}{timer_cwc}"
         )
         self._tree_manager.add_timing_result({"cw": timer_cw, "cwc": timer_cwc})
+        gc.collect()
 
     def payload_with_path_callback(self, cloud_odom: PointCloud2, path_odom: Path):
         self.pc_counter += 1
@@ -628,15 +630,15 @@ class ForestAnalysis:
                 [colorsys.hls_to_rgb(tree.hue, l, 1.0) for l in lightness]
             )
             # add voxel downsampled pcs to tree_clouds
-            tree_clouds.extend(
-                [
-                    cluster["cloud"]
-                    .clone()
-                    .transform(cluster["info"]["T_sensor2map"])
-                    .point.positions.numpy()
-                    for cluster in tree.clusters
-                ]
-            )
+            # tree_clouds.extend(
+            #     [
+            #         cluster["cloud"]
+            #         .clone()
+            #         .transform(cluster["info"]["T_sensor2map"])
+            #         .point.positions.numpy()
+            #         for cluster in tree.clusters
+            #     ]
+            # )
             # tree_clouds.append(tree.points)
             # tree_colors.append(colorsys.hls_to_rgb(hue, 0.6, 1.0))
             if tree.canopy_mesh is not None:
@@ -653,10 +655,10 @@ class ForestAnalysis:
         self._pub_stem_meshes.publish(mesh_messages)
         self._pub_canopy_meshes.publish(canopy_messages)
         self.publish_cluster_labels(label_texts, label_positions, self._map_frame_id)
-        if len(tree_clouds) > 0:
-            self.publish_pointclouds(
-                self._pub_tree_clusters, tree_clouds, tree_colors, self._map_frame_id
-            )
+        # if len(tree_clouds) > 0:
+        #     self.publish_pointclouds(
+        #         self._pub_tree_clusters, tree_clouds, tree_colors, self._map_frame_id
+        #     )
 
         # Terrain
         verts, tris = self._tree_manager.get_terrain()
@@ -684,12 +686,16 @@ class ForestAnalysis:
         # save terrain model as pickle
 
         print(f"Dumping tree manager to {os.path.join(path, 'tree_manager.pkl')}")
+        for tree in self._tree_manager.trees:
+            tree.load_points()
         with open(os.path.join(path, "tree_manager.pkl"), "wb") as file:
             pickle.dump(self._tree_manager, file)
 
     def shutdown_routine(self, *args):
         """Executes the operations before killing the mission analysis procedures"""
         self.export_tree_manager()
+        for tree in self._tree_manager.trees:
+            tree.remove_tmp_file()
         self._clustering_pool.close()
         rospy.loginfo("Digiforest Analysis node stopped!")
 
@@ -708,6 +714,7 @@ class TreeManager:
         terrain_use_embree: bool = True,
         generate_canopy_mesh: bool = True,
         output_path: str = "/tmp",
+        offload_to_disk: bool = False,
         debug_level: int = 0,
     ) -> None:
         """constructor of the TreeManager class
@@ -748,6 +755,7 @@ class TreeManager:
         self.generate_canopy_mesh = generate_canopy_mesh
         self.base_output_path = output_path
         self.debug_level = debug_level
+        self._offload_to_disk = offload_to_disk
 
         self.tree_reco_flags: List[List[bool]] = []
         self.tree_coverage_angles: List[float] = []
@@ -775,7 +783,11 @@ class TreeManager:
             cluster (dict): Dict as in the list returned by TreeSegmentation.process()
         """
         place_holder_height = self.crop_upper_bound - self.crop_lower_bound
-        new_tree = Tree(self.num_trees, place_holder_height)
+        new_tree = Tree(
+            self.num_trees,
+            place_holder_height,
+            tmp_path=self.base_output_path if self._offload_to_disk else None
+        )
         new_tree.add_cluster(cluster)
         self.trees.append(new_tree)
         self.tree_reco_flags.append({"angle_flag": False, "distance_flag": False})
