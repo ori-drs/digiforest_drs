@@ -326,7 +326,10 @@ class Circle:
             probas -= probas.min() - 1e-12
             probas /= probas.max()
 
-        N_circs = n_iterations
+        N_points = points.shape[0]
+        N_circs = int(N_points * (N_points - 1) * (N_points - 2) * 0.01)
+        N_circs = max(N_points, min(N_circs, n_iterations))
+        N_circs = min(max(N_points, N_circs), n_iterations)
 
         if sampling == "weighted":
             indices = (
@@ -1322,13 +1325,13 @@ class Tree:
                 continue
 
             # fit circle
-            # filter_circle = Circle.from_cloud_ransahc(
-            #     points,
-            #     min_radius=radius_lb,
-            #     max_radius=radius_ub,
-            #     center_region=center_region,
-            #     circle_height=slice_height,
-            # )
+            filter_circle = Circle.from_cloud_ransahc(
+                points,
+                min_radius=radius_lb,
+                max_radius=radius_ub,
+                center_region=center_region,
+                circle_height=slice_height,
+            )
             # filter_circle = Circle.from_cloud_hough(
             #     points,
             #     min_radius=radius_lb,
@@ -1337,15 +1340,15 @@ class Tree:
             #     entropy_weighting=0.0,
             #     circle_height=slice_height,
             # )
-            filter_circle = Circle.from_cloud_ransac(
-                points,
-                circle_height=slice_height,
-                min_radius=radius_lb,
-                max_radius=radius_ub,
-                center_region=center_region,
-                sampling="random",
-                n_iterations=1000,
-            )
+            # filter_circle = Circle.from_cloud_ransac(
+            #     points,
+            #     circle_height=slice_height,
+            #     min_radius=radius_lb,
+            #     max_radius=radius_ub,
+            #     center_region=center_region,
+            #     sampling="weighted",
+            #     n_iterations=1000,
+            # )
 
             if filter_circle is None:
                 remove_inds.append(i_cluster)
