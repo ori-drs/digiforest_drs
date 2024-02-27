@@ -3,6 +3,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 import open3d as o3d
 import rospy
+import gc
 
 from sensor_msgs.msg import PointCloud2
 from digiforest_analysis.tasks.tree_segmentation_voronoi import TreeSegmentationVoronoi
@@ -146,7 +147,8 @@ def clustering_worker_fun(
             )
             clusters[i]["info"]["T_sensor2map"] = T_sensor2map
             clusters[i]["info"]["time_stamp"] = center_stamp
-
+    
+    gc.collect()
     return clusters, terrain, timer
 
 

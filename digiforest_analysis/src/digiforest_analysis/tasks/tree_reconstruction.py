@@ -11,6 +11,9 @@ from scipy.spatial import cKDTree
 import trimesh
 from digiforest_analysis.utils.matrix_calc import efficient_inv
 from digiforest_analysis.utils.distances import pnts_to_axes_sq_dist
+import os
+import pickle
+import gc
 
 
 class Circle:
@@ -750,9 +753,10 @@ class Circle:
 
 
 class Tree:
-    def __init__(self, id: int, place_holder_height: float = 5) -> None:
+    def __init__(self, id: int, place_holder_height: float = 5, tmp_path: str = None) -> None:
         self.id = id
         self.place_holder_height = place_holder_height
+        self._tmp_path = tmp_path
 
         self.reconstructed = False
         self.circles: List[Circle] = None
@@ -770,8 +774,37 @@ class Tree:
         self.dbh = None
 
     def add_cluster(self, cluster: dict):
+        self.load_points()
         self.clusters.append(cluster)
+        self.store_points()
 
+    def load_points(self):
+        if self._tmp_path is None:
+            return
+        path = os.path.join(self._tmp_path, "tree_points", f"tree_{self.id:0>5}.pkl")
+        if not os.path.exists(path):
+            return
+        with open(path, "rb") as file:
+            points = pickle.load(file)
+        assert (
+            len(points) == len(self.clusters),
+            "Something went wrong with loading the points from disk"
+        )
+        for i in range(len(self.clusters)):
+            self.clusters[i]["cloud"] = points[i]
+    
+    def store_points(self):
+        if self._tmp_path is None:
+            return
+        path = os.path.join(self._tmp_path, "tree_points")
+        os.makedirs(path, exist_ok=True)
+        filename = os.path.join(path,  f"tree_{self.id:0>5}.pkl")
+        with open(filename, "wb") as file:
+            pickle.dump([c["cloud"] for c in self.clusters], file)
+        for i in range(len(self.clusters)):
+            del self.clusters[i]["cloud"]
+        gc.collect() # actually delete the points
+     
     @property
     def axis(self) -> dict:
         """Returns Axis of the tree in the MAP FRAME. The axis is calculated as the
@@ -814,6 +847,8 @@ class Tree:
         if len(self.clusters) == 0:
             raise ValueError("No measurements available yet.")
 
+        self.load_points()
+        
         # align points using axes
         ax_locs_map = np.stack(
             (c["info"]["T_sensor2map"] @ c["info"]["axis"]["transform"][:, 3])
@@ -835,6 +870,7 @@ class Tree:
                 for cluster, delta in zip(self.clusters, delta_translations_map)
             ]
         )
+        self.store_points()
 
     def transform_circles(self, translation: np.ndarray, rotation: np.ndarray):
         """applies the transform to all member objects of this tree.
@@ -1090,6 +1126,7 @@ class Tree:
         force_straight: bool = False,
         max_radius: float = np.inf,
     ):
+        self.load_points()
         circle_stack = []
         cluster_points_map = [
             cluster["cloud"].point.positions.numpy()
@@ -1097,6 +1134,7 @@ class Tree:
             + cluster["info"]["T_sensor2map"][:3, 3]
             for cluster in self.clusters
         ]
+        self.store_points()
         cluster_points_upright = [
             (points - self.axis["transform"][:3, 3]) @ self.axis["transform"][:3, :3]
             for points in cluster_points_map
@@ -1322,13 +1360,13 @@ class Tree:
                 continue
 
             # fit circle
-            # filter_circle = Circle.from_cloud_ransahc(
-            #     points,
-            #     min_radius=radius_lb,
-            #     max_radius=radius_ub,
-            #     center_region=center_region,
-            #     circle_height=slice_height,
-            # )
+            filter_circle = Circle.from_cloud_ransahc(
+                points,
+                min_radius=radius_lb,
+                max_radius=radius_ub,
+                center_region=center_region,
+                circle_height=slice_height,
+            )
             # filter_circle = Circle.from_cloud_hough(
             #     points,
             #     min_radius=radius_lb,
@@ -1337,15 +1375,15 @@ class Tree:
             #     entropy_weighting=0.0,
             #     circle_height=slice_height,
             # )
-            filter_circle = Circle.from_cloud_ransac(
-                points,
-                circle_height=slice_height,
-                min_radius=radius_lb,
-                max_radius=radius_ub,
-                center_region=center_region,
-                sampling="random",
-                n_iterations=1000,
-            )
+            # filter_circle = Circle.from_cloud_ransac(
+            #     points,
+            #     circle_height=slice_height,
+            #     min_radius=radius_lb,
+            #     max_radius=radius_ub,
+            #     center_region=center_region,
+            #     sampling="random",
+            #     n_iterations=1000,
+            # )
 
             if filter_circle is None:
                 remove_inds.append(i_cluster)
@@ -1413,12 +1451,14 @@ class Tree:
         filter_radius: float = 0.05,
     ):
         circle_stack = []
+        self.load_points()
         cluster_points_map = [
             cluster["cloud"].point.positions.numpy()
             @ cluster["info"]["T_sensor2map"][:3, :3].T
             + cluster["info"]["T_sensor2map"][:3, 3]
             for cluster in self.clusters
         ]
+        self.store_points()
         cluster_points_upright = [
             (points - self.axis["transform"][:3, 3]) @ self.axis["transform"][:3, :3]
             for points in cluster_points_map
@@ -1737,3 +1777,13 @@ class Tree:
         if "dbh" not in state:
             state["dbh"] = None
         self.__dict__.update(state)
+
+    def remove_tmp_file(self):
+        if self._tmp_path is None:
+            return
+        filename = os.path.join(self._tmp_path, "tree_points",  f"tree_{self.id:0>5}.pkl")
+        if os.path.exists(filename):
+            os.remove(filename)
+            
+    def __del__(self):
+        self.remove_tmp_file()
