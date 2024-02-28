@@ -9,7 +9,6 @@ from scipy.spatial.transform import Rotation
 from plotly import graph_objects as go
 from scipy.spatial import cKDTree
 import trimesh
-from digiforest_analysis.utils.matrix_calc import efficient_inv
 from digiforest_analysis.utils.distances import pnts_to_axes_sq_dist
 import os
 import pickle
@@ -854,28 +853,17 @@ class Tree:
 
         self.load_points()
 
-        # align points using axes
-        ax_locs_map = np.stack(
-            (c["info"]["T_sensor2map"] @ c["info"]["axis"]["transform"][:, 3])
-            for c in self.clusters
-        )
-        ax_locs_axis = (efficient_inv(self.axis["transform"]) @ ax_locs_map.T).T
-        delta_translations_axis = np.concatenate(
-            (ax_locs_axis[:, :2], np.zeros((len(ax_locs_axis), 2))), axis=1
-        )
-        delta_translations_map = (self.axis["transform"] @ delta_translations_axis.T).T
-
         # transform all points to odom frame and then stack them
-        return np.vstack(
+        points = np.vstack(
             [
                 cluster["cloud"].point.positions.numpy()
                 @ cluster["info"]["T_sensor2map"][:3, :3].T
                 + cluster["info"]["T_sensor2map"][:3, 3]
-                - delta[:3]
-                for cluster, delta in zip(self.clusters, delta_translations_map)
+                for cluster in self.clusters
             ]
         )
         self.store_points()
+        return points
 
     def transform_circles(self, translation: np.ndarray, rotation: np.ndarray):
         """applies the transform to all member objects of this tree.
@@ -1792,6 +1780,8 @@ class Tree:
     def __setstate__(self, state):
         if "dbh" not in state:
             state["dbh"] = None
+        if "_tmp_path" not in state:
+            state["_tmp_path"] = None
         self.__dict__.update(state)
 
     def remove_tmp_file(self):

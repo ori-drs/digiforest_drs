@@ -203,7 +203,7 @@ class ForestAnalysis:
         )
         self._fitting_n_threads = rospy.get_param("~fitting/n_threads", 1)
         self._generate_canopy_mesh = rospy.get_param("~fitting/generate_canopy", True)
-        self._max_reco_diameter = rospy.get_param("~fitting/max_reco_diameter", np.inf)
+        self._max_reco_diameter = rospy.get_param("~fitting/max_diameter", np.inf)
 
         # Internals
         self._tf_buffer = None
@@ -595,7 +595,7 @@ class ForestAnalysis:
             if len(tree.clusters) < 3:
                 continue
 
-            if np.max(tree.points[:, 2]) - np.min(tree.points[:, 2]) < 5.0:
+            if np.max(tree.points[:, 2]) - np.min(tree.points[:, 2]) < 7.0:
                 continue
 
             label_text = (
@@ -627,20 +627,22 @@ class ForestAnalysis:
             lightness = np.linspace(0.1, 0.9, len(tree.clusters))
             lightness = np.random.permutation(lightness)
             tree_colors.extend(
+                # [[241, 148, 59] for _ in lightness]
                 [colorsys.hls_to_rgb(tree.hue, l, 1.0) for l in lightness]
             )
             # add voxel downsampled pcs to tree_clouds
-            # tree_clouds.extend(
-            #     [
-            #         cluster["cloud"]
-            #         .clone()
-            #         .transform(cluster["info"]["T_sensor2map"])
-            #         .point.positions.numpy()
-            #         for cluster in tree.clusters
-            #     ]
-            # )
-            # tree_clouds.append(tree.points)
-            # tree_colors.append(colorsys.hls_to_rgb(hue, 0.6, 1.0))
+            tree.load_points()
+            tree_clouds.extend(
+                [
+                    cluster["cloud"]
+                    .clone()
+                    .transform(cluster["info"]["T_sensor2map"])
+                    .point.positions.numpy()
+                    for cluster in tree.clusters
+                ]
+            )
+            tree.store_points()
+
             if tree.canopy_mesh is not None:
                 message = self.generate_mesh_msg(
                     tree.canopy_mesh["verts"],
@@ -655,10 +657,10 @@ class ForestAnalysis:
         self._pub_stem_meshes.publish(mesh_messages)
         self._pub_canopy_meshes.publish(canopy_messages)
         self.publish_cluster_labels(label_texts, label_positions, self._map_frame_id)
-        # if len(tree_clouds) > 0:
-        #     self.publish_pointclouds(
-        #         self._pub_tree_clusters, tree_clouds, tree_colors, self._map_frame_id
-        #     )
+        if len(tree_clouds) > 0:
+            self.publish_pointclouds(
+                self._pub_tree_clusters, tree_clouds, tree_colors, self._map_frame_id
+            )
 
         # Terrain
         verts, tris = self._tree_manager.get_terrain()
@@ -668,7 +670,7 @@ class ForestAnalysis:
                 tris,
                 frame_id=self._map_frame_id,
                 time_stamp=self.last_pc_header.stamp,
-                color=[156 / 255, 93 / 255, 59 / 255],
+                color=[191 / 255, 152 / 255, 124 / 255],
                 alpha=1.0,
                 id=0,
             )
@@ -786,7 +788,7 @@ class TreeManager:
         new_tree = Tree(
             self.num_trees,
             place_holder_height,
-            tmp_path=self.base_output_path if self._offload_to_disk else None
+            tmp_path=self.base_output_path if self._offload_to_disk else None,
         )
         new_tree.add_cluster(cluster)
         self.trees.append(new_tree)
