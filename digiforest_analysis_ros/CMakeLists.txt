@@ -4,21 +4,35 @@ project(digiforest_analysis_ros)
 find_package(catkin REQUIRED COMPONENTS
   pcl_ros
   tf_conversions
+  message_generation
+  std_msgs
 )
+
 
 catkin_python_setup()
 
+add_service_files(
+  FILES
+  TreeToggler.srv
+  )
+generate_messages(
+  DEPENDENCIES
+  std_msgs
+)
+  
 catkin_package(
   # INCLUDE_DIRS
   #   include
   CATKIN_DEPENDS 
-    pcl_ros
-    ros2raw
-    tf_conversions
-    vilens_msgs
-    vilens_slam_msgs
+  pcl_ros
+  ros2raw
+  tf_conversions
+  vilens_msgs
+  vilens_slam_msgs
+  message_runtime
 )
 
+ 
 ###########
 ## Python #
 ###########
@@ -42,7 +56,8 @@ install(TARGETS ${TARGETS}
 
 # Mark cpp header files for installation
 install(DIRECTORY include/${PROJECT_NAME}/
-  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION})
+  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
+  FILES_MATCHING PATTERN "*.hpp"
+)
 
-
-
+  

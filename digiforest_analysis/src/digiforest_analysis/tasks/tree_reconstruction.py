@@ -240,6 +240,7 @@ class Circle:
     def from_cloud_bullock(
         cls,
         points: np.ndarray,
+        weights: np.ndarray = None,
         fixed_radius: float = None,
         circle_height: float = 0.0,
         **kwargs,
@@ -256,15 +257,17 @@ class Circle:
         """
         if fixed_radius is None:
             # normalize points
+            if weights is None:
+                weights = np.ones(points.shape[0])
             points_mean = np.mean(points, axis=0)
             u = points[:, 0] - points_mean[0]
             v = points[:, 1] - points_mean[1]
             # pre-calculate summands
-            S_uu = np.sum(np.power(u, 2))
-            S_vv = np.sum(np.power(v, 2))
-            S_uv = np.sum(u * v)
-            S_uuu_uvv = np.sum(np.power(u, 3) + u * np.power(v, 2))
-            S_vvv_vuu = np.sum(np.power(v, 3) + v * np.power(u, 2))
+            S_uu = np.sum(np.power(u, 2) * weights)
+            S_vv = np.sum(np.power(v, 2) * weights)
+            S_uv = np.sum(u * v * weights)
+            S_uuu_uvv = np.sum((np.power(u, 3) + u * np.power(v, 2)) * weights)
+            S_vvv_vuu = np.sum((np.power(v, 3) + v * np.power(u, 2)) * weights)
 
             # calculate circle center in normalized coordinates and radius
             v_c = (S_uuu_uvv / (2 * S_uu) - S_vvv_vuu / (2 * S_uv)) / (
@@ -283,6 +286,9 @@ class Circle:
             r = fixed_radius
             A = np.hstack([2 * points, np.ones((points.shape[0], 1))])
             b = np.sum(np.power(points, 2), axis=1) - np.power(r, 2)
+            if weights is not None:
+                A = A * weights[:, None]
+                b = b * weights
             c = np.linalg.lstsq(A, b, rcond=None)[0]
             x_c, y_c = c[:2]
             return cls((x_c, y_c, circle_height), r)
@@ -756,18 +762,22 @@ class Circle:
 
 class Tree:
     def __init__(
-        self, id: int, place_holder_height: float = 5, tmp_path: str = None
+        self,
+        id: int,
+        place_holder_height: float = 5,
+        tmp_path: str = None,
+        payload_crop_radius: float = 20,
     ) -> None:
         self.id = id
         self.place_holder_height = place_holder_height
         self._tmp_path = tmp_path
+        self.payload_crop_radius = payload_crop_radius
 
         self.reconstructed = False
         self.circles: List[Circle] = None
         self.canopy_mesh = None
 
         self.clusters = []
-        self.DBH = None
         self.number_bends = None
         self.clear_wood = None
 
@@ -776,6 +786,20 @@ class Tree:
 
         self.hue = np.random.rand()
         self.dbh = None
+
+    def merge(self, other_trees: List["Tree"]):
+        for other_tree in other_trees:
+            self.clusters.extend(other_tree.clusters)
+        self.reset()
+
+    def reset(self):
+        self.reconstructed = False
+        self.circles = None
+        self.canopy_mesh = None
+        self.number_bends = None
+        self.clear_wood = None
+        self.num_clusters_after_last_reco = 0
+        self.cosys_changed_after_last_reco = False
 
     def add_cluster(self, cluster: dict):
         self.load_points()
@@ -1346,6 +1370,7 @@ class Tree:
         scores = []
         point_counts = []
         remove_inds = []
+        filter_indices = []
         for i_cluster, points in enumerate(sliced_clusters):
             # too few points
             if len(points) < 10:
@@ -1353,14 +1378,6 @@ class Tree:
                 continue
 
             # fit circle
-            filter_circle = Circle.from_cloud_ransahc(
-                points,
-                min_radius=radius_lb,
-                max_radius=radius_ub,
-                center_region=center_region,
-                circle_height=slice_height,
-            )
-            # filter_circle = Circle.from_cloud_hough(
             filter_circle = Circle.from_cloud_ransahc(
                 points,
                 min_radius=radius_lb,
@@ -1377,7 +1394,6 @@ class Tree:
             #     entropy_weighting=0.0,
             #     circle_height=slice_height,
             # )
-            # filter_circle = Circle.from_cloud_ransac(
             # filter_circle = Circle.from_cloud_ransac(
             #     points,
             #     circle_height=slice_height,
@@ -1405,9 +1421,9 @@ class Tree:
             scores.append(score)
             point_count = np.sum(dists_circle < 0.05 * filter_circle.radius)
             point_counts.append(point_count)
+            filter_indices.append(i_cluster)
         for i in remove_inds[::-1]:
             sliced_clusters.pop(i)
-
         # no fit found
         if len(ransahc_circles) == 0:
             return None
@@ -1432,6 +1448,7 @@ class Tree:
             ransahc_circles.pop(i)
             scores.pop(i)
             point_counts.pop(i)
+            filter_indices.pop(i)
         if len(sliced_clusters) == 0:
             return None  # no slices left
         if np.sum(point_counts) < 10:
@@ -1442,6 +1459,7 @@ class Tree:
             "scores": np.array(scores),
             "point_counts": np.array(point_counts),
             "filtered_points": deepcopy(sliced_clusters),
+            "filter_indices": np.array(filter_indices),
         }
 
     def reconstruct3(  # noqa: C901
@@ -1513,6 +1531,20 @@ class Tree:
                 for cluster_points in cluster_points_upright
             ]
 
+            # find distances from cluster to sensor
+            dists_clusters2sensor = np.linalg.norm(
+                [
+                    (c["info"]["T_sensor2map"] @ c["info"]["axis"]["transform"])[:2, 3]
+                    - c["info"]["T_sensor2map"][:2, 3]
+                    for c in self.clusters
+                ],
+                axis=1,
+            )
+            cluster_weights = np.exp(
+                dists_clusters2sensor / self.payload_crop_radius * np.log(0.01)
+            )  # one percent at payload crop radius
+            cluster_weights /= np.sum(cluster_weights)
+
             # try to fit hough circles to the slices
             slice_circles = self._filter_slice(
                 sliced_clusters,
@@ -1528,7 +1560,11 @@ class Tree:
                 continue
 
             # fit bulloc circles with fixed radius of mean ransahc circles
-            weights = slice_circles["scores"] * slice_circles["point_counts"]
+            weights = (
+                slice_circles["scores"]
+                * slice_circles["point_counts"]
+                # * cluster_weights[slice_circles["filter_indices"]]
+            )
             if np.sum(weights) < 1e-12:
                 fail_counter += 1
                 i_slice_height += 1
@@ -1553,7 +1589,7 @@ class Tree:
             # ax.set_title(f"Slice at height {slice_height:.2f} m")
             # hues = np.linspace(0, 1, len(slice_circles["filtered_points"]))
             # for points, circle, hue in zip(
-            #     slice_circles["filtered_points"], slice_circles["bullock_circles"], hues
+            #     slice_circles["filtered_points"], slice_circles["ransahc_circles"], hues
             # ):
             #     color = colorsys.hls_to_rgb(hue, 0.45, 0.8)
             #     ax.scatter(
@@ -1575,8 +1611,10 @@ class Tree:
             # plt.show()
 
             # shift all circles to using the bulloc circles
-            mean_center = np.mean(
-                np.vstack([c.center for c in slice_circles["bullock_circles"]]), axis=0
+            mean_center = np.average(
+                np.vstack([c.center for c in slice_circles["bullock_circles"]]),
+                # weights=cluster_weights[slice_circles["filter_indices"]],
+                axis=0,
             )
             shifts = mean_center - np.vstack(
                 [c.center for c in slice_circles["bullock_circles"]]
@@ -1586,8 +1624,15 @@ class Tree:
 
             # fit final bullock circle
             points = np.vstack(slice_circles["filtered_points"])
+            # weights = np.concatenate(
+            #     [
+            #         np.ones(len(pc)) * w
+            #         for pc, w in zip(slice_circles["filtered_points"], cluster_weights)
+            #     ]
+            # )
+            weights = np.ones(len(points))
             slice_circles["final_circle"] = Circle.from_cloud_bullock(
-                points, circle_height=slice_height
+                points, weights=weights, circle_height=slice_height
             )
 
             # reject bad fits
@@ -1782,6 +1827,8 @@ class Tree:
             state["dbh"] = None
         if "_tmp_path" not in state:
             state["_tmp_path"] = None
+        if "payload_crop_radius" not in state:
+            state["payload_crop_radius"] = 20.0
         self.__dict__.update(state)
 
     def remove_tmp_file(self):

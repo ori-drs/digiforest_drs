@@ -27,6 +27,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
 from nav_msgs.msg import Path
 from std_srvs.srv import Empty
+from digiforest_analysis_ros.srv import TreeToggler
 import message_filters
 from geometry_msgs.msg import PoseStamped
 import trimesh
@@ -76,6 +77,7 @@ class ForestAnalysis:
             self._generate_canopy_mesh,
             output_path=self.base_output_path,
             debug_level=self._debug_level,
+            payload_crop_radius=self._clustering_crop_radius,
         )
         if self._terrain_enabled:
             self.terrain_fitter = TerrainFitting(
@@ -219,9 +221,19 @@ class ForestAnalysis:
 
         # Services
         self.export_tree_manager_service = rospy.Service(
-            "digiforest/export_tree_manager",
+            "/digiforest_analysis_ros/export_tree_manager",
             Empty,
             lambda _: self.export_tree_manager(),
+        )
+
+        def toggle_tree_visibility_callback(req):
+            print(req)
+            return []
+
+        self.toggle_tree_service = rospy.Service(
+            "/digiforest_analysis_ros/toggle_tree_visibility",
+            TreeToggler,
+            toggle_tree_visibility_callback,
         )
 
         def toggle_loop_closure_callback(_):
@@ -234,7 +246,9 @@ class ForestAnalysis:
             return []
 
         self.toggle_loop_closure_service = rospy.Service(
-            "digiforest/toggle_loop_closure", Empty, toggle_loop_closure_callback
+            "/digiforest_analysis_ros/toggle_loop_closure",
+            Empty,
+            toggle_loop_closure_callback,
         )
 
         # # Subscribers
@@ -705,7 +719,7 @@ class ForestAnalysis:
 class TreeManager:
     def __init__(
         self,
-        distance_threshold: float = 0.1,
+        distance_threshold: float = 0.5,
         reco_min_angle_coverage: float = 1.5 * np.pi,
         reco_min_distance: float = 4.0,
         crop_upper_bound: float = 1.0,
@@ -718,13 +732,14 @@ class TreeManager:
         output_path: str = "/tmp",
         offload_to_disk: bool = False,
         debug_level: int = 0,
+        payload_crop_radius: float = 20.0,
     ) -> None:
         """constructor of the TreeManager class
 
         Args:
             distance_threshold (float, optional): Distance in m closer than which the
                 center points of two tree axes, the axes are considered to be identical.
-                Defaults to 0.1.
+                Defaults to 0.5.
             reco_min_angle_coverage (float, optional): Minimum arc length in rad the
                 rays from sensor to tree axis of all paths have to have swept for the
                 tree to be reconstructed. Defaults to 1.5*np.pi.
@@ -758,6 +773,7 @@ class TreeManager:
         self.base_output_path = output_path
         self.debug_level = debug_level
         self._offload_to_disk = offload_to_disk
+        self.payload_crop_radius = payload_crop_radius
 
         self.tree_reco_flags: List[List[bool]] = []
         self.tree_coverage_angles: List[float] = []
@@ -776,6 +792,8 @@ class TreeManager:
     def _update_kd_tree(self):
         """Updates the KD tree with the current tree centers"""
         centers = [tree.axis["transform"][:2, 3] for tree in self.trees]
+        if len(centers) == 0:
+            return
         self._kd_tree = cKDTree(centers)
 
     def _new_tree_from_cluster(self, cluster: dict):
@@ -789,6 +807,7 @@ class TreeManager:
             self.num_trees,
             place_holder_height,
             tmp_path=self.base_output_path if self._offload_to_disk else None,
+            payload_crop_radius=self.payload_crop_radius,
         )
         new_tree.add_cluster(cluster)
         self.trees.append(new_tree)
@@ -1134,6 +1153,33 @@ class TreeManager:
                     if changed_pose["stamp"] == cluster["info"]["time_stamp"]:
                         cluster["info"]["T_sensor2map"] = changed_pose["pose"]
 
+        self._update_kd_tree()
+        self.try_remerge_trees()
+
+    def try_remerge_trees(self):
+        if self._kd_tree is None:
+            return
+        while True:
+            merges = self._kd_tree.query_ball_tree(
+                self._kd_tree, r=self.distance_threshold
+            )
+            merges = sorted(
+                list(set([tuple(sorted(r)) for r in merges if len(r) > 1])),
+                key=lambda x: len(x),
+                reverse=True,
+            )
+            if len(merges) == 0:
+                break
+            merge: List[int] = merges[0]
+            remaining_tree = self.trees[merge[0]]
+            remaining_tree.merge([self.trees[i] for i in merge[1:]])
+            if np.any([self.trees[i].reconstructed for i in merge]):
+                self.analyze_tree(remaining_tree)
+            for i in merge[1:]:
+                self.trees.pop(i)
+            self._update_kd_tree()
+            rospy.loginfo(f"Merged trees {merge}")
+
     def calculate_coverage(
         self,
         cluster_sensor: dict,
@@ -1253,21 +1299,25 @@ class TreeManager:
             if self.debug_level > 0:
                 rospy.loginfo(f"Reconstructing tree {tree.id}")
 
-            reco_sucess = tree.reconstruct3(max_radius=self.max_radius)
-            if reco_sucess:
-                tree.num_clusters_after_last_reco = len(tree.clusters)
-                tree.cosys_changed_after_last_reco = False
-                if self.generate_canopy_mesh:
-                    tree.generate_canopy()
-                if self.terrain_interpolator:
-                    terrain_height = self.terrain_interpolator(
-                        tree.axis["transform"][:2, 3]
-                    )[0]
-                    if not np.isnan(terrain_height):
-                        tree.compute_dbh(terrain_height)
+            reco_sucess = self.analyze_tree(tree)
             reco_happened |= reco_sucess
 
         return reco_happened
+
+    def analyze_tree(self, tree: Tree):
+        reco_sucess = tree.reconstruct3(max_radius=self.max_radius)
+        if reco_sucess:
+            tree.num_clusters_after_last_reco = len(tree.clusters)
+            tree.cosys_changed_after_last_reco = False
+            if self.generate_canopy_mesh:
+                tree.generate_canopy()
+            if self.terrain_interpolator:
+                terrain_height = self.terrain_interpolator(
+                    tree.axis["transform"][:2, 3]
+                )[0]
+                if not np.isnan(terrain_height):
+                    tree.compute_dbh(terrain_height)
+        return reco_sucess
 
     def write_results(self, path: str):
         """Writes the tree data base to a csv file
