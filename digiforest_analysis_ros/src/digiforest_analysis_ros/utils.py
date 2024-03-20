@@ -147,7 +147,7 @@ def clustering_worker_fun(
             )
             clusters[i]["info"]["T_sensor2map"] = T_sensor2map
             clusters[i]["info"]["time_stamp"] = center_stamp
-    
+
     gc.collect()
     return clusters, terrain, timer
 

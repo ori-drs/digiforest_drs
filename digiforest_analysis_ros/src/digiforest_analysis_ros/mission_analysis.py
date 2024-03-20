@@ -43,6 +43,7 @@ class MissionAnalysis:
         )
         self._state_twist = rospy.get_param("~twist_topic", "/vilens/twist_optimized")
         self._state_pose = rospy.get_param("~pose_topic", "/vilens/pose_optimized")
+        self._vilens_state = rospy.get_param("~vilens_state_topic", None)
 
         # Optional topics
         self._reference_twist_topic = rospy.get_param(
@@ -62,8 +63,11 @@ class MissionAnalysis:
         )
 
         self._tf_reference_frames = rospy.get_param(
-            "~tf_reference_frames", ["base_vilens", "map_vilens"]
+            "~tf_reference_frames",
+            [],
         )
+        print(self._tf_reference_frames, type(self._tf_reference_frames))
+        # self._tf_reference_frames = list(self._tf_reference_frames)
 
         self._tf_query_frames = rospy.get_param(
             "~tf_query_frames", ["LF_FOOT", "RF_FOOT", "LH_FOOT", "RH_FOOT"]
@@ -80,12 +84,21 @@ class MissionAnalysis:
         self._sub_slam_graph = rospy.Subscriber(
             self._slam_graph_topic, Path, self.slam_graph_callback
         )
+
         self._sub_state_pose = rospy.Subscriber(
             self._state_pose, PoseWithCovarianceStamped, self.state_pose_callback
         )
+
         self._sub_state_twist = rospy.Subscriber(
             self._state_twist, TwistWithCovarianceStamped, self.state_twist_callback
         )
+
+        if self._vilens_state:
+            from vilens_msgs.msg import State
+
+            self._sub_vilens_state = rospy.Subscriber(
+                self._vilens_state, State, self.state_callback
+            )
 
         # Optional
         self._sub_reference_twist = rospy.Subscriber(
@@ -169,7 +182,10 @@ class MissionAnalysis:
         )
 
         self._tf_converter = {}
+        rospy.logwarn(self._tf_reference_frames)
+        rospy.logwarn(type(self._tf_reference_frames))
         for parent in self._tf_reference_frames:
+            rospy.logwarn(parent)
             for child in self._tf_query_frames:
                 prefix = f"{parent}_{child}"
                 self._tf_converter[prefix] = TransformStampedConverter(
@@ -194,6 +210,18 @@ class MissionAnalysis:
         twist.header = msg.header
         twist.twist = msg.twist.twist
         self._twist_converter.save(twist)
+
+    def state_callback(self, msg):
+        rospy.loginfo_throttle(60, "Logging VILENS state...")
+        twist = TwistStamped()
+        twist.header = msg.header
+        twist.twist = msg.twist
+        self._twist_converter.save(twist)
+
+        pose = PoseStamped()
+        pose.header = msg.header
+        pose.pose = msg.pose
+        self._pose_converter.save(pose)
 
     def tf_frames_callback(self, msg):
         rospy.loginfo_throttle(60, "Logging TFs...")

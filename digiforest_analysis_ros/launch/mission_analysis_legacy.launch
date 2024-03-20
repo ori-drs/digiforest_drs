@@ -1,18 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <launch>
   <arg name="slam_graph_topic"     default="/vilens_slam/slam_poses"/>
-  <arg name="pose_topic"          default="/vilens/pose_optimized"/>
-  <arg name="twist_topic"          default="/vilens/twist_optimized"/>
-  <arg name="vilens_state_topic"   default="/vilens/state_optimized"/>
+  <arg name="pose_topic"           default="/state_estimator/pose_in_odom"/>
+  <arg name="twist_topic"          default="/state_estimator/twist"/>
+  <arg name="vilens_state_topic"   default=""/>
   
-  <arg name="tf_reference_frames"  default="['base_vilens', 'map']"/>
+  <arg name="tf_reference_frames"  default="['base', 'map_vilens']"/>
   <arg name="tf_query_frames"      default="['LF_FOOT', 'RF_FOOT', 'LH_FOOT', 'RH_FOOT']"/>
 
   <!-- Optional topics -->
-  <!-- <arg name="reference_twist_topic" default="/local_guidance_path_follower/twist"/> -->
-  <arg name="reference_twist_topic" default="/field_local_planner/twist"/>
-  <!-- <arg name="operator_twist_topic"   default="/motion_reference/command_twist"/> -->
-  <arg name="operator_twist_topic"   default="/collision_filter/twist"/>
+  <arg name="reference_twist_topic" default="/local_guidance_path_follower/twist"/>
+  <arg name="operator_twist_topic"   default="/motion_reference/command_twist"/>
 
   <!-- Launch mission_analysis_node -->
   <node pkg="digiforest_analysis_ros" type="mission_analysis_node.py" name="digiforest_mission_analysis" output="screen" >
