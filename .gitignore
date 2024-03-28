@@ -8,4 +8,6 @@ trees/*
 terrains/*
 payload_clouds/*
 */output/*
-*/env
+*/env/*
+*/bin/*
+*/activate/*

@@ -30,6 +30,7 @@ catkin_package(
   vilens_msgs
   vilens_slam_msgs
   message_runtime
+  std_msgs
 )
 
  

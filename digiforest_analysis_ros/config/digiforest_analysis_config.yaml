@@ -17,8 +17,8 @@ topic:
 
 tree_manager:
   distance_threshold: 0.5
-  reco_min_angle_coverage: 120
-  reco_min_distance: 10.0
+  reco_min_angle_coverage: 90
+  reco_min_distance: 5.0
 
 terrain:
   enabled: True
@@ -48,7 +48,7 @@ fitting:
   grid_res: 0.01
   point_ratio: 0.2
   entropy_weighting: 10.0
-  max_consecutive_fails: 3
+  max_consecutive_fails: 10
   max_height: 15.0
   save_debug_results: False
   n_threads: 1  
