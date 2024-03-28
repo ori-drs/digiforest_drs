@@ -759,6 +759,13 @@ class Circle:
         self.x, self.y, self.z = self.center
         self.rot_mat = rot_mat @ self.rot_mat
 
+    def get_export_dict(self) -> dict:
+        return {
+            "center": self.center,
+            "radius": self.radius,
+            "normal": self.rot_mat[:, 2],
+        }
+
 
 class Tree:
     def __init__(
@@ -767,6 +774,7 @@ class Tree:
         place_holder_height: float = 5,
         tmp_path: str = None,
         payload_crop_radius: float = 20,
+        **kwargs,
     ) -> None:
         self.id = id
         self.place_holder_height = place_holder_height
@@ -778,14 +786,21 @@ class Tree:
         self.canopy_mesh = None
 
         self.clusters = []
-        self.number_bends = None
-        self.clear_wood = None
 
         self.num_clusters_after_last_reco = 0
         self.cosys_changed_after_last_reco = False
 
         self.hue = np.random.rand()
         self.dbh = None
+
+    @classmethod
+    def from_folder(
+        cls,
+        folder: str,
+        tmp_path: str = None,
+    ) -> "Tree":
+
+        pass
 
     def merge(self, other_trees: List["Tree"]):
         for other_tree in other_trees:
@@ -796,8 +811,6 @@ class Tree:
         self.reconstructed = False
         self.circles = None
         self.canopy_mesh = None
-        self.number_bends = None
-        self.clear_wood = None
         self.num_clusters_after_last_reco = 0
         self.cosys_changed_after_last_reco = False
 
@@ -888,6 +901,16 @@ class Tree:
         )
         self.store_points()
         return points
+
+    @property
+    def canopy_volume(self):
+        if self.canopy_mesh is not None:
+            canopy_mesh = trimesh.Trimesh(
+                vertices=self.canopy_mesh["verts"], faces=self.canopy_mesh["tris"]
+            )
+            return canopy_mesh.volume
+        else:
+            return None
 
     def transform_circles(self, translation: np.ndarray, rotation: np.ndarray):
         """applies the transform to all member objects of this tree.
@@ -1471,6 +1494,7 @@ class Tree:
         force_straight: bool = False,
         max_radius: float = np.inf,
         filter_radius: float = 0.05,
+        max_consecutive_fails: int = 5,
     ):
         circle_stack = []
         self.load_points()
@@ -1503,7 +1527,7 @@ class Tree:
 
         while i_slice_height < len(slice_heights):  # len of slice_heights is changed
             slice_height = slice_heights[i_slice_height]
-            if fail_counter == 5:
+            if fail_counter == max_consecutive_fails:
                 break
 
             # determine boundary conditions for ransahc fits
@@ -1678,6 +1702,7 @@ class Tree:
             # fig.show()
             # plt.show()
 
+            # NMS
             if len(circle_stack) == 0:
                 if len(init_candidates) == 0:
                     if i_slice_height == len(slice_heights) - 1:
@@ -1783,7 +1808,7 @@ class Tree:
         if not self.reconstructed:
             return False
         # filter out points close to floor (by map z axis)
-        canopy_points = self.points[self.points[:, 2] > 2.0]
+        canopy_points = self.points[self.points[:, 2] - np.min(self.points[:, 2]) > 2.0]
         if len(canopy_points) < 10:
             return False
         # filter out points close to reconstruction
@@ -1792,7 +1817,7 @@ class Tree:
         )
         sq_dists = pnts_to_axes_sq_dist(canopy_points, axis[None, :]).flatten()
         mask = np.logical_or(
-            sq_dists > (2 * self.axis["radius"]) ** 2,
+            sq_dists > (1.5 * self.axis["radius"]) ** 2,
             canopy_points[:, 2] > np.max(canopy_points[:, 2]) - 0.5,
         )
         canopy_points = canopy_points[mask]
@@ -1832,6 +1857,8 @@ class Tree:
         self.__dict__.update(state)
 
     def remove_tmp_file(self):
+        if "_tmp_path" not in self.__dict__:
+            return
         if self._tmp_path is None:
             return
         filename = os.path.join(
@@ -1839,6 +1866,44 @@ class Tree:
         )
         if os.path.exists(filename):
             os.remove(filename)
+
+    def get_export_dict(self):
+        export_dict = {
+            "id": self.id,
+            "place_holder_height": self.place_holder_height,
+            "payload_crop_radius": self.payload_crop_radius,
+            "reconstructed": self.reconstructed,
+            "circles": self.circles,
+            "canopy_mesh": self.canopy_mesh,
+            "clusters": deepcopy(self.clusters),
+            "dbh": self.dbh,
+        }
+        for cluster in export_dict["clusters"]:
+            del cluster["cloud"]
+        return export_dict
+
+    def write_to_disk(self, root_dir: str):
+        tree_dir = os.path.join(root_dir, f"tree_{self.id:0>5}")
+        if not os.path.exists(tree_dir):
+            os.makedirs(tree_dir)
+        else:
+            for file in os.listdir(tree_dir):
+                os.remove(os.path.join(root_dir, f"tree_{self.id:0>5}", file))
+        with open(os.path.join(tree_dir, "tree.pkl"), "wb") as file:
+            pickle.dump(self.get_export_dict(), file)
+        for cluster in self.clusters:
+            try:
+                cloud = cluster["cloud"].to_legacy()
+            except AttributeError:
+                # cloud already is legacy
+                cloud = cluster["cloud"]
+            o3d.io.write_point_cloud(
+                os.path.join(
+                    tree_dir,
+                    f"cluster_{cluster['info']['time_stamp'].secs}_{cluster['info']['time_stamp'].nsecs:0>9}.pcd",
+                ),
+                cloud,
+            )
 
     def __del__(self):
         self.remove_tmp_file()

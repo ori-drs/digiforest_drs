@@ -6,6 +6,9 @@ from copy import deepcopy
 from functools import partial
 import os
 import pickle
+import shutil
+from tempfile import NamedTemporaryFile
+import zipfile
 from digiforest_analysis.tasks.terrain_fitting import TerrainFitting
 import numpy as np
 import pandas as pd
@@ -27,19 +30,16 @@ from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
 from nav_msgs.msg import Path
 from std_srvs.srv import Empty
-from digiforest_analysis_ros.srv import TreeToggler
 import message_filters
 from geometry_msgs.msg import PoseStamped
 import trimesh
 import gc
 
+import open3d as o3d
+
 from digiforest_analysis.tasks.tree_reconstruction import Tree
 from digiforest_analysis.utils.timing import Timer
-from digiforest_analysis_ros.utils import (
-    pose2T,
-    clustering_worker_fun,
-    apply_transform,
-)
+from digiforest_analysis_ros.utils import pose2T, clustering_worker_fun, apply_transform
 from digiforest_analysis.utils.meshing import meshgrid_to_mesh
 from digiforest_analysis.utils.distances import distance_line_to_line
 
@@ -78,6 +78,7 @@ class ForestAnalysis:
             output_path=self.base_output_path,
             debug_level=self._debug_level,
             payload_crop_radius=self._clustering_crop_radius,
+            max_consecutive_fails=self._fitting_max_consecutive_fails,
         )
         if self._terrain_enabled:
             self.terrain_fitter = TerrainFitting(
@@ -93,6 +94,7 @@ class ForestAnalysis:
         self.tree_manager_lock = Lock()
         self.pose_graph_stamps = []
         self._posegraph_updates_active = True
+        self.visibility_mask = None
 
         rospy.on_shutdown(self.shutdown_routine)
 
@@ -226,19 +228,36 @@ class ForestAnalysis:
             lambda _: self.export_tree_manager(),
         )
 
-        def toggle_tree_visibility_callback(req):
-            print(req)
+        def toggle_tree_visibility_callback(_):
+            path = os.path.join(self.base_output_path, "tree_visibility_mask.txt")
+            if not os.path.exists(path):
+                rospy.loginfo("No tree visibility mask found under " + path)
+                return []
+            with open(path, "r") as file:
+                visibility_mask = [int(line) for line in file.readlines() if line != ""]
+            if visibility_mask == []:
+                rospy.loginfo("No trees in mask, showing all trees")
+                return []
+            if self.visibility_mask is None:
+                self.visibility_mask = visibility_mask
+                rospy.loginfo(
+                    "Now only showing trees with ids: " + str(visibility_mask)
+                )
+            else:
+                self.visibility_mask = None
+                rospy.loginfo("Now showing all trees")
+            self.publish_tree_manager_state()
             return []
 
         self.toggle_tree_service = rospy.Service(
             "/digiforest_analysis_ros/toggle_tree_visibility",
-            TreeToggler,
+            Empty,
             toggle_tree_visibility_callback,
         )
 
         def toggle_loop_closure_callback(_):
             self._posegraph_updates_active = not self._posegraph_updates_active
-            print(
+            rospy.loginfo(
                 "Posegraph Updates now active"
                 if self._posegraph_updates_active
                 else "Posegraph Updates now inactive"
@@ -592,6 +611,9 @@ class ForestAnalysis:
                 self._tree_manager.update_poses(posegraph_msg.path.poses)
 
     def publish_tree_manager_state(self):
+        if len(self._tree_manager.trees) == 0:
+            return
+
         label_texts = []
         label_positions = []
         mesh_messages = MarkerArray()
@@ -610,6 +632,9 @@ class ForestAnalysis:
                 continue
 
             if np.max(tree.points[:, 2]) - np.min(tree.points[:, 2]) < 7.0:
+                continue
+
+            if self.visibility_mask is not None and tree.id not in self.visibility_mask:
                 continue
 
             label_text = (
@@ -691,21 +716,18 @@ class ForestAnalysis:
         )
 
     def export_tree_manager(self):
-        path = os.path.join(self.base_output_path, "trees", "logs", "raw")
-        print(f"Creating directory{path}")
-        os.makedirs(path, exist_ok=True)
-
-        # for tree in self._tree_manager.trees:
-        #     # write tree as pickle
-        #     with open(path + f"tree{str(tree.id).zfill(3)}.pkl", "wb") as file:
-        #         pickle.dump(tree, file)
-        # save terrain model as pickle
-
-        print(f"Dumping tree manager to {os.path.join(path, 'tree_manager.pkl')}")
+        stamp_now = rospy.Time.now()
+        path = os.path.join(
+            self.base_output_path,
+            "trees",
+            "logs",
+            "raw",
+            f"tree_manager_{stamp_now.secs}_{stamp_now.nsecs:0>9}",
+        )
+        print(f"Dumping tree manager to {path}")
         for tree in self._tree_manager.trees:
             tree.load_points()
-        with open(os.path.join(path, "tree_manager.pkl"), "wb") as file:
-            pickle.dump(self._tree_manager, file)
+        self._tree_manager.write_to_zip(path)
 
     def shutdown_routine(self, *args):
         """Executes the operations before killing the mission analysis procedures"""
@@ -733,6 +755,8 @@ class TreeManager:
         offload_to_disk: bool = False,
         debug_level: int = 0,
         payload_crop_radius: float = 20.0,
+        max_consecutive_fails: int = 3,
+        **kwargs,
     ) -> None:
         """constructor of the TreeManager class
 
@@ -774,6 +798,7 @@ class TreeManager:
         self.debug_level = debug_level
         self._offload_to_disk = offload_to_disk
         self.payload_crop_radius = payload_crop_radius
+        self.max_consecutive_fails = max_consecutive_fails
 
         self.tree_reco_flags: List[List[bool]] = []
         self.tree_coverage_angles: List[float] = []
@@ -788,6 +813,48 @@ class TreeManager:
 
         self.capture_Ts_with_stamps: List[dict] = []
         self.timing_results = []
+
+    @classmethod
+    def from_zip(cls, path: str) -> "TreeManager":
+        archive = zipfile.ZipFile(path, "r")
+        tree_manager_dict = pickle.loads(archive.read("tree_manager.pkl"))
+        tree_manager = cls(**tree_manager_dict)
+        tree_manager.tree_reco_flags = tree_manager_dict["tree_reco_flags"]
+        tree_manager.tree_coverage_angles = tree_manager_dict["tree_coverage_angles"]
+        tree_manager.num_trees = tree_manager_dict["num_trees"]
+        tree_manager._last_cluster_time = tree_manager_dict["last_cluster_time"]
+        tree_manager.capture_Ts_with_stamps = tree_manager_dict[
+            "capture_Ts_with_stamps"
+        ]
+        tree_manager.timing_results = tree_manager_dict["timing_results"]
+        tree_manager.terrains = tree_manager_dict["terrains"]
+
+        for i in range(tree_manager.num_trees):
+            try:
+                tree_dict = pickle.loads(archive.read(f"tree_{i:0>5}/tree.pkl"))
+            except KeyError:
+                continue
+            tree = Tree(**tree_dict)
+            tree.reconstructed = tree_dict["reconstructed"]
+            tree.circles = tree_dict["circles"]
+            tree.canopy_mesh = tree_dict["canopy_mesh"]
+            tree.clusters = tree_dict["clusters"]
+            tree.dbh = tree_dict["dbh"]
+            for j in range(len(tree.clusters)):
+                with NamedTemporaryFile(mode="w+b", suffix=".pcd") as tmp_file:
+                    tmp_file.write(
+                        archive.read(
+                            f"tree_{i:0>5}/cluster_{tree.clusters[j]['info']['time_stamp'].secs}_{tree.clusters[j]['info']['time_stamp'].nsecs:0>9}.pcd"
+                        )
+                    )
+                    tmp_file.seek(0)
+                    tree_cloud = o3d.io.read_point_cloud(tmp_file.name)
+                tree.clusters[j]["cloud"] = tree_cloud
+            tree_manager.trees.append(tree)
+
+        tree_manager._update_kd_tree()  # initializes kd tree
+        _ = tree_manager.get_terrain()  # initializes terrain interpolator
+        return tree_manager
 
     def _update_kd_tree(self):
         """Updates the KD tree with the current tree centers"""
@@ -1305,7 +1372,9 @@ class TreeManager:
         return reco_happened
 
     def analyze_tree(self, tree: Tree):
-        reco_sucess = tree.reconstruct3(max_radius=self.max_radius)
+        reco_sucess = tree.reconstruct3(
+            max_radius=self.max_radius, max_consecutive_fails=self.max_consecutive_fails
+        )
         if reco_sucess:
             tree.num_clusters_after_last_reco = len(tree.clusters)
             tree.cosys_changed_after_last_reco = False
@@ -1325,13 +1394,9 @@ class TreeManager:
         Args: path (str, optional): Path to the directory where the csv and xlsx file is
             saved.
         """
-        if not os.path.exists(os.path.join(path, "csv")):
-            os.makedirs(os.path.join(path, "csv"), exist_ok=True)
-        if not os.path.exists(os.path.join(path, "xlsx")):
-            os.makedirs(os.path.join(path, "xlsx"), exist_ok=True)
         file_name = (
             "TreeManagerState_"
-            + f"{self._last_cluster_time.secs}_{self._last_cluster_time.nsecs}"
+            + f"{self._last_cluster_time.secs}_{self._last_cluster_time.nsecs:0>9}"
         )
         file_name_csv = file_name + ".csv"
         file_name_xlsx = file_name + ".xlsx"
@@ -1343,15 +1408,11 @@ class TreeManager:
             "location_y",
             "number_clusters",
             "coverage_angle",
-            "DBH",
-            "number_bends",
-            "clear_wood",
+            "reconstructed" "dbh",
         ]
         # write tree data
         data = []
         for tree in self.trees:
-            # TODO replace with accurate calculation of DBH
-            tree.DBH = tree.axis["radius"] * 2
             data.append(
                 [
                     tree.id,
@@ -1359,13 +1420,49 @@ class TreeManager:
                     tree.axis["transform"][1, 3],
                     len(tree.clusters),
                     np.rad2deg(self.tree_coverage_angles[tree.id]),
-                    tree.DBH,
-                    tree.number_bends,
-                    tree.clear_wood,
+                    tree.reconstructed,
+                    tree.dbh,
                 ]
             )
         df = pd.DataFrame(data, columns=columns)
-        df.to_csv(
-            os.path.join(path, "csv", file_name_csv), float_format="%.3f", index=False
-        )
-        df.to_excel(os.path.join(path, "xlsx", file_name_xlsx), index=False)
+        df.to_csv(os.path.join(path, file_name_csv), float_format="%.3f", index=False)
+        df.to_excel(os.path.join(path, file_name_xlsx), index=False)
+
+    def write_to_zip(self, path):
+        print(f"Saving to zipfile {path}")
+        if path.endswith(".zip"):
+            path = path.replace(".zip", "")
+        os.makedirs(path, exist_ok=True)
+        for tree in self.trees:
+            tree.write_to_disk(path)
+        export_dict = {
+            "distance_threshold": self.distance_threshold,
+            "reco_min_angle_coverage": self.reco_min_angle_coverage,
+            "reco_min_distance": self.reco_min_distance,
+            "crop_upper_bound": self.crop_upper_bound,
+            "crop_lower_bound": self.crop_lower_bound,
+            "max_radius": self.max_radius,
+            "terrain_confidence_stds": self.terrain_confidence_stds,
+            "terrain_confidence_sensor_weight": self.terrain_confidence_sensor_weight,
+            "terrain_use_embree": self.use_embree,
+            "generate_canopy_mesh": self.generate_canopy_mesh,
+            "output_path": self.base_output_path,
+            "debug_level": self.debug_level,
+            "offload_to_disk": self._offload_to_disk,
+            "payload_crop_radius": self.payload_crop_radius,
+            "max_consecutive_fails": self.max_consecutive_fails,
+            "tree_reco_flags": self.tree_reco_flags,
+            "tree_coverage_angles": self.tree_coverage_angles,
+            "num_trees": self.num_trees,
+            "last_cluster_time": self._last_cluster_time,
+            "capture_Ts_with_stamps": self.capture_Ts_with_stamps,
+            "timing_results": self.timing_results,
+            "terrains": self.terrains,
+        }
+
+        with open(os.path.join(path, "tree_manager.pkl"), "wb") as file:
+            pickle.dump(export_dict, file)
+        self.write_results(path)
+
+        shutil.make_archive(path, "zip", path)
+        shutil.rmtree(path)
