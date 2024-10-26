@@ -5,7 +5,6 @@
 
 # setup(**d)
 
-# from setuptools import find_packages
 from distutils.core import setup
 
 setup(
@@ -13,7 +12,11 @@ setup(
     version="0.0.0",
     author="Matias Mattamala",
     author_email="matias@robots.ox.ac.uk",
-    packages=["digiforest_analysis"],
+    packages=[
+        "digiforest_analysis",
+        "digiforest_analysis.tasks",
+        "digiforest_analysis.utils",
+    ],
     package_dir={"": "src"},
     python_requires=">=3.6",
     description="Python tools for DigiForest",
