@@ -21,16 +21,22 @@ def adjust_lightness(color, amount=0.5):
 
 def darken(color, amount=0.0):
     """Darkens a color. 0.0 means no change"""
-    import numpy as np
+    import numpy as np  # noqa
 
-    return adjust_lightness(color, 1.0 - np.clip(amount, 0.0, 1.0))
+    # return adjust_lightness(color, 1.0 - np.clip(amount, 0.0, 1.0))
+    return ((1 - amount) * color[0], (1 - amount) * color[1], (1 - amount) * color[2])
 
 
 def lighten(color, amount=0.0):
     """Darkens a color. 0.0 means no change"""
-    import numpy as np
+    import numpy as np  # noqa
 
-    return adjust_lightness(color, 1.0 + np.clip(amount, 0.0, 1.0))
+    # return adjust_lightness(color, 1.0 + np.clip(amount, 0.0, 1.0))
+    return (
+        (1 - amount) * color[0] + amount,
+        (1 - amount) * color[1] + amount,
+        (1 - amount) * color[2] + amount,
+    )
 
 
 n_colors = 10
