@@ -55,3 +55,9 @@ forest_cloud.pcd
 tree_<ID>.pcd
 ...
 ```
+
+
+### Random notes
+pip install numpy==1.19.5 pandas==1.2.0 --force-reinstall
+pip install velodyne-decoder --force-reinstall
+pip install open3d
