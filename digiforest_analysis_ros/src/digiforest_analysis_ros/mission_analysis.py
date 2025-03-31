@@ -21,6 +21,8 @@ from ros2raw.converters import (
     TransformStampedConverter,
     TwistStampedConverter,
 )
+from vilens_msgs.msg import State
+from std_msgs.msg import String
 
 
 class MissionAnalysis:
@@ -43,6 +45,8 @@ class MissionAnalysis:
 
         self._state_twist = rospy.get_param("~twist_topic", "/vilens/twist_optimized")
         self._state_pose = rospy.get_param("~pose_topic", "/vilens/pose_optimized")
+        self._state = rospy.get_param("~state_topic", "/vilens/state_optimized")
+        
 
         # Optional topics
         self._reference_twist_topic = rospy.get_param(
@@ -51,6 +55,13 @@ class MissionAnalysis:
 
         self._operator_twist_topic = rospy.get_param(
             "~operator_twist_topic", "/motion_reference/command_twist"
+        )
+
+        self._operator_twist_mux_topic= rospy.get_param(
+            "~operator_twist_mux_topic", "/twist_mux/twist"
+        )
+        self._operator_twist_mux_input_topic = rospy.get_param(
+            "~operator_twist_mux_input_topic", "/twist_mux/selected_input"
         )
 
         self._local_planner_param_topic = rospy.get_param(
@@ -62,11 +73,15 @@ class MissionAnalysis:
         )
 
         self._tf_reference_frames = rospy.get_param(
-            "~tf_reference_frames", ["base_vilens", "map_vilens"]
+            "~tf_reference_frames", ["base_vilens", "map"]
         )
 
         self._tf_query_frames = rospy.get_param(
             "~tf_query_frames", ["LF_FOOT", "RF_FOOT", "LH_FOOT", "RH_FOOT"]
+        )
+
+        self._local_planner_string = rospy.get_param(
+            "~local_planner_string", "local_planner"
         )
 
     def setup_ros(self):
@@ -86,6 +101,10 @@ class MissionAnalysis:
         self._sub_state_twist = rospy.Subscriber(
             self._state_twist, TwistWithCovarianceStamped, self.state_twist_callback
         )
+        self._sub_state = rospy.Subscriber(
+            self._state, State, self.state_callback
+        )
+
 
         # Optional
         self._sub_reference_twist = rospy.Subscriber(
@@ -98,6 +117,18 @@ class MissionAnalysis:
             self._operator_twist_topic,
             TwistStamped,
             self.operator_twist_callback,
+        )
+
+        self._sub_operator_twist_mux = rospy.Subscriber(
+            self._operator_twist_mux_topic,
+            TwistStamped,
+            self.operator_twist_mux_callback,
+        )
+
+        self._sub_operator_twist_mux_input = rospy.Subscriber(
+            self._operator_twist_mux_input_topic,
+            String,
+            self.operator_twist_mux_input_callback,
         )
 
         self._sub_local_planner_param = rospy.Subscriber(
@@ -123,6 +154,9 @@ class MissionAnalysis:
 
         # Output folder
         self.make_mission_report_folder()
+
+        # Twist mux state
+        self._is_twist_mux_local_planner = False
 
         # Set converters
         self._slam_graph_converter = PathConverter(
@@ -194,6 +228,18 @@ class MissionAnalysis:
         twist.header = msg.header
         twist.twist = msg.twist.twist
         self._twist_converter.save(twist)
+    
+    def state_callback(self, msg: State):
+        rospy.loginfo_throttle(60, "Logging state...")
+        pose = PoseStamped()
+        pose.header = msg.header
+        pose.pose = msg.pose
+        self._pose_converter.save(pose)
+
+        twist = TwistStamped()
+        twist.header = msg.header
+        twist.twist = msg.twist
+        self._twist_converter.save(twist)
 
     def tf_frames_callback(self, msg):
         rospy.loginfo_throttle(60, "Logging TFs...")
@@ -216,6 +262,18 @@ class MissionAnalysis:
     def operator_twist_callback(self, msg: TwistStamped):
         rospy.loginfo_throttle(60, "Logging operator twist...")
         self._operator_twist_converter.save(msg)
+    
+    def operator_twist_mux_callback(self, msg: TwistStamped):
+        rospy.loginfo_throttle(60, "Logging operator twist...")
+        if not self._is_twist_mux_local_planner:
+            self._operator_twist_converter.save(msg)
+    
+    def operator_twist_mux_input_callback(self, msg: String):
+        print(msg)
+        if msg.data == self._local_planner_string:
+            self._is_twist_mux_local_planner = True
+        else:
+            self._is_twist_mux_local_planner = False
 
     def local_planner_param_callback(self, msg: Config):
         rospy.loginfo_throttle(60, "Logging local planner param config changes...")

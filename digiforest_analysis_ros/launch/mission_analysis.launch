@@ -2,18 +2,28 @@
 <launch>
   <arg name="slam_graph_topic"     default="/vilens_slam/slam_poses"/>
   <arg name="twist_topic"          default="/vilens/twist_optimized"/>
-
-  <!-- Optional topics -->
-  <arg name="operator_twist_topic"   default="/motion_reference/command_twist"/>
   <arg name="tf_frames"              default="['base']"/>
 
+  <!-- Optional topics -->
+  <!-- <arg name="operator_twist_topic"   default="/motion_reference/command_twist"/> -->
+
+  <!-- ANYmal D Dolly experiments -->
+  <!-- <arg name="reference_twist_topic" default="/local_planner/twist"/>
+  <arg name="operator_twist_topic"   default="/collision_filter/twist"/> -->
+  
+  <!-- ANYmal D RSL experiments -->
+  <arg name="reference_twist_topic" default="/local_planner/twist"/>
+  <arg name="operator_twist_topic"   default="/dummy_twist"/>
+  <arg name="operator_twist_mux_topic"   default="/twist_mux/twist"/>
 
   <!-- Launch mission_analysis_node -->
   <node pkg="digiforest_analysis_ros" type="mission_analysis_node.py" name="digiforest_mission_analysis" output="screen" >
     <param name="slam_graph_topic"     value="$(arg slam_graph_topic)" />
     <param name="twist_topic"          value="$(arg twist_topic)" />
 
-    <param name="operator_twist_topic"   value="$(arg operator_twist_topic)" />
+    <param name="reference_twist_topic"      value="$(arg reference_twist_topic)" />
+    <param name="operator_twist_topic"       value="$(arg operator_twist_topic)" />
+    <param name="operator_twist_mux_topic"   value="$(arg operator_twist_mux_topic)" />
     <param name="tf_frames"              value="$(arg tf_frames)" />
   </node>
 
