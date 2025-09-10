@@ -13,7 +13,7 @@ setup(
     version="0.0.0",
     author="Matias Mattamala",
     author_email="matias@robots.ox.ac.uk",
-    packages=["digiforest_analysis"],
+    packages=find_packages(where="src"),
     package_dir={"": "src"},
     python_requires=">=3.6",
     description="Python tools for DigiForest",
